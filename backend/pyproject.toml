@@ -1,0 +1,41 @@
+[project]
+name = "mathmodel-zhuochen"
+version = "0.1.0"
+description = "数学建模竞赛数据分析题全流程自动化系统"
+requires-python = ">=3.12"
+dependencies = [
+    "aioredis>=2.0.1",
+    "ansi2html>=1.9.2",
+    "fastapi[standard]>=0.115.8",
+    "httpx>=0.28.1",
+    "ipykernel>=6.29.5",
+    "jupyter-client>=8.6.3",
+    "litellm>=1.69.0",
+    "loguru>=0.7.3",
+    "matplotlib>=3.10.1",
+    "nbformat>=5.10.4",
+    "numpy>=2.2.5",
+    "openai>=1.65.4",
+    "openpyxl>=3.1.5",
+    "pandas>=2.2.3",
+    "pydantic>=2.10.6",
+    "pydantic-settings>=2.8.0",
+    "pypandoc-binary>=1.15",
+    "redis>=5.2.1",
+    "scikit-learn>=1.6.1",
+    "scipy>=1.15.2",
+    "seaborn>=0.13.2",
+    "shap>=0.47.2",
+    "statsmodels>=0.14.4",
+    "uvicorn[standard]>=0.34.0",
+    "xgboost>=3.0.0",
+    "chromadb>=0.4.0",
+    "sentence-transformers>=2.7.0",
+    "pymupdf>=1.24.0",
+    "pdfplumber>=0.11.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9.10",
+]

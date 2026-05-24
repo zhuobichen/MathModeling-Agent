@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Environment
+.env.dev
+.env.prod
+.env
+.env.private
+.env.user
+
+# IDE
+.vscode/
+.idea/
+
+# Project
+project/work_dir/
+*.ipynb
+data/chromadb/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
