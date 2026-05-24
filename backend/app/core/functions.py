@@ -23,13 +23,85 @@ coder_tools = [
     },
 ]
 
-# have installed: numpy scipy pandas matplotlib seaborn scikit-learn xgboost
+# 读取文件工具 schema
+read_file_tool = {
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": "读取工作目录中数据文件的前N行（默认20行），用于理解数据结构、列名和内容格式。支持CSV/Excel/TXT文件。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "文件名，如 '附件.xlsx'"},
+                "n_rows": {"type": "integer", "description": "读取行数，默认20"},
+                "sheet_name": {"type": "string", "description": "Excel的sheet名称或序号，默认第一个sheet"},
+            },
+            "required": ["filename"],
+            "additionalProperties": False,
+        },
+    },
+}
 
-# TODO: pip install python
+# 安装Python包工具 schema
+install_package_tool = {
+    "type": "function",
+    "function": {
+        "name": "install_package",
+        "description": "安装缺失的Python包。仅当import失败且确认包名正确时使用。安装后需要重新import。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "package": {"type": "string", "description": "包名，如 'scikit-learn'"},
+            },
+            "required": ["package"],
+            "additionalProperties": False,
+        },
+    },
+}
 
-# TODO: read files
+# 文献搜索工具 schema (独立定义，供 tool_registry 注册)
+search_papers_tool = {
+    "type": "function",
+    "function": {
+        "name": "search_papers",
+        "description": "搜索真实学术论文和参考文献，用于论文中引用。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索查询"},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
 
-# TODO: get_cites
+# ── Agent 工具配置 ──
+AGENT_TOOL_CONFIG = {
+    "ParserAgent": {
+        "always": ["read_file"],
+        "optional": ["search_knowledge"],
+    },
+    "ModelerAgent": {
+        "always": ["search_knowledge"],
+        "optional": ["search_web", "read_file"],
+    },
+    "CoderAgent": {
+        "always": ["execute_code"],
+        "optional": ["search_knowledge", "install_package", "read_file"],
+    },
+    "WriterAgent": {
+        "always": ["search_papers"],
+        "optional": ["search_knowledge", "search_web"],
+    },
+    "ReviewerAgent": {
+        "always": [],
+        "optional": ["search_papers", "search_knowledge"],
+    },
+}
 
 
 # Web 搜索工具 schema

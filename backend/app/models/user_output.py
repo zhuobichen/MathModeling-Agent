@@ -134,6 +134,8 @@ class UserOutput:
         ref_index = 1
 
         for seq_key in self.seq:
+            if seq_key not in replace_res:
+                continue
             text = replace_res[seq_key]["response_content"]
             # 找到[uuid]
             uuid_list = re.findall(r"\[([a-f0-9-]{36})\]", text)
@@ -177,18 +179,109 @@ class UserOutput:
 
         sort_res = self.sort_text_with_footnotes(replace_res)
 
+        # 补全缺失的章标题
+        _insert_chapter_headers(sort_res)
+
+        # 只拼接实际存在内容的章节，避免 KeyError
         full_res_1 = "\n\n".join(
-            [sort_res[key]["response_content"] for key in self.seq]
+            sort_res[key]["response_content"]
+            for key in self.seq
+            if key in sort_res
         )
 
         full_res = self.append_footnotes_to_text(full_res_1)
         return full_res
 
-    def save_result(self):
-        """将结果保存为 res.json 和 res.md 文件。"""
+    def save_result(self) -> str:
+        """将结果保存为 res.json 和 res.md 文件。
+
+        Returns:
+            保存的 Markdown 内容
+        """
+        import re
+
         with open(os.path.join(self.work_dir, "res.json"), "w", encoding="utf-8") as f:
             json.dump(self.res, f, ensure_ascii=False, indent=4)
 
         res_path = os.path.join(self.work_dir, "res.md")
+        text = self.get_result_to_save()
+
+        text = text.lstrip()
+
         with open(res_path, "w", encoding="utf-8") as f:
-            f.write(self.get_result_to_save())
+            f.write(text)
+
+        return text
+
+    @staticmethod
+    def _convert_html_tables(text: str) -> str:
+        """将文本中的 HTML <table> 转换为 markdown 管道表。"""
+        import re
+
+        def _convert_one(match):
+            html = match.group(0)
+            rows = re.findall(r"<tr>(.*?)</tr>", html, re.DOTALL)
+            if not rows:
+                return match.group(0)
+
+            md_rows = []
+            max_cols = 0
+            for row in rows:
+                cells = re.findall(r"<t[hd]>(.*?)</t[hd]>", row, re.DOTALL)
+                cleaned = [c.strip() for c in cells]
+                md_rows.append(cleaned)
+                max_cols = max(max_cols, len(cleaned))
+
+            if not md_rows:
+                return match.group(0)
+
+            lines = []
+            for i, row in enumerate(md_rows):
+                while len(row) < max_cols:
+                    row.append("")
+                lines.append("| " + " | ".join(row) + " |")
+                if i == 0:
+                    lines.append("| " + " | ".join("---" for _ in range(max_cols)) + " |")
+
+            return "\n".join(lines)
+
+        return re.sub(r"<table>.*?</table>", _convert_one, text, flags=re.DOTALL)
+
+
+def _insert_chapter_headers(sort_res: dict) -> None:
+    """为每个章节注入正确的章标题，并剥离LLM自行生成的标题避免重复。
+
+    策略：先移除各节内容中已有的 # 中文编号标题（并行写作时可能各自生成），
+    再统一插入正确的章标题。确保论文一级标题编号连续无重复。
+    """
+    import re
+
+    # 各节对应的章编号和标题
+    chapter_headers: dict[str, str] = {
+        "RepeatQues": "# 一、问题重述",
+        "analysisQues": "# 二、问题分析",
+        "modelAssumption": "# 三、模型假设",
+        "symbol": "# 四、符号说明与数据预处理",
+        "ques1": "# 五、模型的建立与求解",
+        "sensitivity_analysis": "# 六、敏感性分析",
+        "judge": "# 七、模型评价与改进",
+    }
+
+    # 中文编号模式：一、二、... 十、
+    cn_num = "[一二三四五六七八九十]+、"
+    level1_pattern = re.compile(rf"^#\s+{cn_num}.+$", re.MULTILINE)
+
+    # 第一步：从所有章节剥离一级标题（eda/ques2~4 等不应有章标题）
+    for key in list(sort_res.keys()):
+        content = sort_res[key]["response_content"]
+        content = level1_pattern.sub("", content).strip()
+        sort_res[key]["response_content"] = content
+
+    # 第二步：为应拥有章标题的节插入正确的标题
+    for key, header in chapter_headers.items():
+        if key not in sort_res:
+            continue
+        content = sort_res[key]["response_content"]
+        if header not in content:
+            content = header + "\n\n" + content
+        sort_res[key]["response_content"] = content

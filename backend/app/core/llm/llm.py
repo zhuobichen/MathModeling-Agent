@@ -3,21 +3,20 @@
 from typing import Any
 from app.utils.common_utils import transform_link, split_footnotes
 from app.utils.log_util import logger
-import time
+import asyncio
 from app.schemas.response import (
     CoderMessage,
     WriterMessage,
     ModelerMessage,
+    ParserMessage,
+    ReviewerMessage,
     SystemMessage,
-    CoordinatorMessage,
 )
 from app.services.redis_manager import redis_manager
 from litellm import acompletion  # type: ignore[import-unresolved]
 import litellm  # type: ignore[import-unresolved]
 from app.schemas.enums import AgentType
 from app.utils.track import agent_metrics
-from icecream import ic  # type: ignore[import-unresolved]
-
 litellm.callbacks = [agent_metrics]
 
 class LLM:
@@ -56,7 +55,7 @@ class LLM:
         history: list | None = None,
         tools: list | None = None,
         tool_choice: str | None = None,
-        max_retries: int | None = None,  # 最大重试次数，None表示无限制
+        max_retries: int | None = 3,  # 最大重试次数（默认3次，避免无限循环）
         retry_delay: float = 1.0,  # 添加重试延迟
         top_p: float | None = None,  # 添加top_p参数,
         agent_name: str = "SystemAgent",  # CoderAgent or WriterAgent
@@ -106,14 +105,14 @@ class LLM:
                 if max_retries is not None and attempt >= max_retries:
                     logger.debug(f"请求参数: {kwargs}")
                     raise
-                time.sleep(retry_delay * min(attempt, 10))  # 指数退避，上限10秒
+                await asyncio.sleep(retry_delay * min(attempt, 10))  # 指数退避，上限10秒
 
     def _validate_and_fix_tool_calls(self, history: list) -> list:
         """验证并修复工具调用完整性"""
         if not history:
             return history
 
-        ic(f"🔍 开始验证工具调用，历史消息数量: {len(history)}")
+        logger.debug(f"🔍 开始验证工具调用，历史消息数量: {len(history)}")
 
         # 查找所有未匹配的tool_calls
         fixed_history = []
@@ -124,7 +123,7 @@ class LLM:
 
             # 如果是包含tool_calls的消息
             if isinstance(msg, dict) and "tool_calls" in msg and msg["tool_calls"]:
-                ic(f"📞 发现tool_calls消息在位置 {i}")
+                logger.debug(f"📞 发现tool_calls消息在位置 {i}")
 
                 # 检查每个tool_call是否都有对应的response，分别处理
                 valid_tool_calls = []
@@ -132,7 +131,7 @@ class LLM:
 
                 for tool_call in msg["tool_calls"]:
                     tool_call_id = tool_call.get("id")
-                    ic(f"  检查tool_call_id: {tool_call_id}")
+                    logger.debug(f"  检查tool_call_id: {tool_call_id}")
 
                     if tool_call_id:
                         # 查找对应的tool响应
@@ -142,14 +141,14 @@ class LLM:
                                 history[j].get("role") == "tool"
                                 and history[j].get("tool_call_id") == tool_call_id
                             ):
-                                ic(f"  ✅ 找到匹配响应在位置 {j}")
+                                logger.debug(f"  ✅ 找到匹配响应在位置 {j}")
                                 found_response = True
                                 break
 
                         if found_response:
                             valid_tool_calls.append(tool_call)
                         else:
-                            ic(f"  ❌ 未找到匹配响应: {tool_call_id}")
+                            logger.debug(f"  ❌ 未找到匹配响应: {tool_call_id}")
                             invalid_tool_calls.append(tool_call)
 
                 # 根据检查结果处理消息
@@ -158,7 +157,7 @@ class LLM:
                     fixed_msg = msg.copy()
                     fixed_msg["tool_calls"] = valid_tool_calls
                     fixed_history.append(fixed_msg)
-                    ic(
+                    logger.debug(
                         f"  🔧 保留 {len(valid_tool_calls)} 个有效tool_calls，移除 {len(invalid_tool_calls)} 个无效的"
                     )
                 else:
@@ -166,14 +165,14 @@ class LLM:
                     cleaned_msg = {k: v for k, v in msg.items() if k != "tool_calls"}
                     if cleaned_msg.get("content"):
                         fixed_history.append(cleaned_msg)
-                        ic("  🔧 移除所有tool_calls，保留消息内容")
+                        logger.debug("  🔧 移除所有tool_calls，保留消息内容")
                     else:
-                        ic("  🗑️ 完全移除空的tool_calls消息")
+                        logger.debug("  🗑️ 完全移除空的tool_calls消息")
 
             # 如果是tool响应消息，检查是否是孤立的
             elif isinstance(msg, dict) and msg.get("role") == "tool":
                 tool_call_id = msg.get("tool_call_id")
-                ic(f"🔧 检查tool响应消息: {tool_call_id}")
+                logger.debug(f"🔧 检查tool响应消息: {tool_call_id}")
 
                 # 查找对应的tool_calls
                 found_call = False
@@ -187,9 +186,9 @@ class LLM:
 
                 if found_call:
                     fixed_history.append(msg)
-                    ic("  ✅ 保留有效的tool响应")
+                    logger.debug("  ✅ 保留有效的tool响应")
                 else:
-                    ic(f"  🗑️ 移除孤立的tool响应: {tool_call_id}")
+                    logger.debug(f"  🗑️ 移除孤立的tool响应: {tool_call_id}")
 
             else:
                 # 普通消息，直接保留
@@ -198,9 +197,9 @@ class LLM:
             i += 1
 
         if len(fixed_history) != len(history):
-            ic(f"🔧 修复完成: {len(history)} -> {len(fixed_history)} 条消息")
+            logger.debug(f"🔧 修复完成: {len(history)} -> {len(fixed_history)} 条消息")
         else:
-            ic("✅ 验证通过，无需修复")
+            logger.debug("✅ 验证通过，无需修复")
 
         return fixed_history
 
@@ -235,10 +234,13 @@ class LLM:
                 agent_msg = ModelerMessage(content=content)
             case AgentType.SYSTEM:
                 agent_msg = SystemMessage(content=content)
-            case AgentType.COORDINATOR:
-                agent_msg = CoordinatorMessage(content=content)
+            case AgentType.PARSER:
+                agent_msg = ParserMessage(content=content)
+            case AgentType.REVIEWER:
+                agent_msg = ReviewerMessage(content=content)
             case _:
-                raise ValueError(f"不支持的agent类型: {agent_name}")
+                logger.warning(f"未匹配的agent类型(非阻塞): {agent_name}")
+                return  # 静默跳过，不重试
 
         await redis_manager.publish_message(
             self.task_id,

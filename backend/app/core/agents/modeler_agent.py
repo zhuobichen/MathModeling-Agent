@@ -2,41 +2,25 @@
 
 from app.core.agents.agent import Agent
 from app.core.llm.llm import LLM
-from app.core.prompts.modeler import MODELER_PROMPT
+from app.core.skill_loader import skill_loader
 from app.config.setting import settings
 from app.schemas.A2A import ParserToModeler, ModelerToCoder
 from app.services.redis_manager import redis_manager
 from app.schemas.response import SystemMessage
 from app.utils.log_util import logger
+from app.tools.tool_registry import tool_registry
 import json
-import re
+
+from app.utils.json_repair import repair_json
 
 
-def repair_json(json_str: str) -> dict | None:
-    """尝试修复 LLM 输出的格式错误的 JSON。"""
-    json_str = json_str.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError:
-        pass
-    try:
-        fixed = re.sub(
-            r'(?<=: ")(.*?)(?=",\s*\n\s*"|"\s*\n\s*})',
-            lambda m: m.group(0).replace('"', '\\"'),
-            json_str,
-            flags=re.DOTALL,
-        )
-        return json.loads(fixed)
-    except (json.JSONDecodeError, re.error):
-        pass
-    try:
-        pattern = r'"(\w+)"\s*:\s*"((?:[^"\\]|\\.|"(?!,\s*\n)|"(?!\s*\n\s*}))*)"'
-        matches = re.findall(pattern, json_str, re.DOTALL)
-        if matches:
-            return {k: v.replace('\\"', '"') for k, v in matches}
-    except re.error:
-        pass
-    return None
+def _get_tools_for(agent_name: str) -> list[dict]:
+    """从 AGENT_TOOL_CONFIG 获取 Agent 的工具 schema 列表。"""
+    from app.core.functions import AGENT_TOOL_CONFIG
+    config = AGENT_TOOL_CONFIG.get(agent_name, {"always": [], "optional": []})
+    schemas = tool_registry.get_schemas(config["always"])
+    schemas.extend(tool_registry.get_schemas(config["optional"]))
+    return schemas
 
 
 class ModelerAgent(Agent):
@@ -50,8 +34,9 @@ class ModelerAgent(Agent):
         max_retries: int = settings.MAX_MODELER_RETRIES,
     ) -> None:
         super().__init__(task_id, model, max_chat_turns)
-        self.system_prompt = MODELER_PROMPT
+        self.system_prompt = skill_loader.get_system_prompt("modeler", include_references=False)
         self.max_retries = max_retries
+        self.available_tools = _get_tools_for("ModelerAgent")
 
     async def run(self, parser_result: ParserToModeler) -> ModelerToCoder:  # type: ignore[reportIncompatibleMethodOverride]
         """基于题目解析结果设计 EDA 和建模方案。
@@ -131,26 +116,26 @@ class ModelerAgent(Agent):
             msg = response.choices[0].message
 
             if hasattr(msg, "tool_calls") and msg.tool_calls:
-                tool_call = msg.tool_calls[0]
-                tool_id = tool_call.id
-                tool_name = tool_call.function.name
-                tool_args = json.loads(tool_call.function.arguments)
-
-                logger.info(f"ModelerAgent 调用工具: {tool_name}")
-                await redis_manager.publish_message(
-                    self.task_id,
-                    SystemMessage(content=f"建模手调用{tool_name}工具"),
-                )
-
                 await self.append_chat_history(msg.model_dump())
-                try:
-                    result = await tool_registry.dispatch(tool_name, tool_args, self.task_id)
-                except ValueError as e:
-                    result = f"工具调用失败: {e}"
+                for tool_call in msg.tool_calls:
+                    tool_id = tool_call.id
+                    tool_name = tool_call.function.name
+                    tool_args = json.loads(tool_call.function.arguments)
 
-                await self.append_chat_history(
-                    {"role": "tool", "tool_call_id": tool_id, "name": tool_name, "content": result}
-                )
+                    logger.info(f"ModelerAgent 调用工具: {tool_name}")
+                    await redis_manager.publish_message(
+                        self.task_id,
+                        SystemMessage(content=f"建模手调用{tool_name}工具"),
+                    )
+
+                    try:
+                        result = await tool_registry.dispatch(tool_name, tool_args, self.task_id)
+                    except ValueError as e:
+                        result = f"工具调用失败: {e}"
+
+                    await self.append_chat_history(
+                        {"role": "tool", "tool_call_id": tool_id, "name": tool_name, "content": result}
+                    )
 
                 next_response = await self.model.chat(
                     history=self.chat_history,

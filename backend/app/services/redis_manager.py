@@ -68,20 +68,22 @@ class RedisManager:
             # 不抛出异常，确保主流程不受影响
 
     async def publish_message(self, task_id: str, message: Message):
-        """发布消息到特定任务的频道并保存到文件"""
-        client = await self.get_client()
-        channel = f"task:{task_id}:messages"
+        """发布消息到特定任务的频道并保存到文件。
+
+        Redis 不可用时只记录警告并保存文件，不抛出异常阻塞流程。
+        """
         try:
+            client = await self.get_client()
+            channel = f"task:{task_id}:messages"
             message_json = message.model_dump_json()
             await client.publish(channel, message_json)
             logger.debug(
                 f"消息已发布到频道 {channel}:mes_type:{message.msg_type}:msg_content:{message.content}"
             )
-            # 保存消息到文件
-            await self._save_message_to_file(task_id, message)
         except Exception as e:
-            logger.error(f"发布消息失败: {str(e)}")
-            raise
+            logger.warning(f"Redis消息发布失败(非阻塞，流程继续): {e}")
+        # 文件持久化不受 Redis 影响
+        await self._save_message_to_file(task_id, message)
 
     async def subscribe_to_task(self, task_id: str):
         """订阅特定任务的消息"""

@@ -5,6 +5,7 @@ from app.tools.notebook_serializer import NotebookSerializer
 import jupyter_client
 from app.utils.log_util import logger
 import os
+import time
 from app.services.redis_manager import redis_manager
 from app.schemas.response import (
     OutputItem,
@@ -27,13 +28,79 @@ class LocalCodeInterpreter(BaseCodeInterpreter):
         self.interrupt_signal = False
 
     async def initialize(self):
-        # 本地内核一般不需异步上传文件，直接切换目录即可
-        # 初始化 Jupyter 内核管理器和客户端
         logger.info("初始化本地内核")
-        self.km, self.kc = jupyter_client.manager.start_new_kernel(
-            kernel_name="python3"
-        )
+        self.km, self.kc = await self._start_kernel_with_retry()
         self._pre_execute_code()
+
+    async def _start_kernel_with_retry(self, max_retries: int = 3):
+        """启动 Jupyter 内核，失败时自动清理残留进程和运行时文件后重试。
+
+        ZeroMQ 在 Windows 上可能在异常退出后残留 socket 资源，
+        通过重试 + 运行时文件清理来绕过。
+        """
+        import asyncio, glob, shutil
+
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                self._cleanup_stale_runtime_files()
+                km, kc = jupyter_client.manager.start_new_kernel(
+                    kernel_name="python3"
+                )
+                # 等待内核就绪，超时则抛出
+                kc.wait_for_ready(timeout=60)
+                logger.info(f"Jupyter 内核启动成功 (attempt {attempt + 1})")
+                return km, kc
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"Jupyter 内核启动失败 (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                if attempt < max_retries - 1:
+                    # 等待 ZMQ 资源释放
+                    await asyncio.sleep(3 * (attempt + 1))
+                    self._kill_orphan_kernels()
+
+        raise RuntimeError(
+            f"Jupyter 内核启动失败，已重试 {max_retries} 次。"
+            f"最后错误: {last_error}。建议重启系统。"
+        )
+
+    @staticmethod
+    def _cleanup_stale_runtime_files():
+        """清理 Jupyter 残留的运行时文件（连接文件、pid 等）。"""
+        import glob, os
+        for pattern in [
+            os.path.expanduser("~/.jupyter/runtime/*.json"),
+            os.path.join(os.environ.get("TEMP", "/tmp"), "jupyter", "*"),
+        ]:
+            for f in glob.glob(pattern):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _kill_orphan_kernels():
+        """杀掉残留的 ipykernel 进程（不碰主进程）。"""
+        import subprocess
+        try:
+            # 只杀 ipykernel 相关进程，不杀所有 python
+            result = subprocess.run(
+                ["wmic", "process", "where",
+                 "name='python.exe' and commandline like '%ipykernel%'",
+                 "get", "processid"],
+                capture_output=True, text=True, timeout=10,
+            )
+            for line in result.stdout.splitlines():
+                pid = line.strip()
+                if pid.isdigit():
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", pid],
+                        capture_output=True,
+                    )
+        except Exception:
+            pass  # wmic/taskkill 不可用时静默跳过
 
     def _pre_execute_code(self):  # type: ignore[reportIncompatibleMethodOverride]
         init_code = (
@@ -133,12 +200,21 @@ class LocalCodeInterpreter(BaseCodeInterpreter):
             error_message,
         )
 
-    def execute_code_(self, code) -> list[tuple[str, str]]:
+    def execute_code_(self, code, total_timeout: int = 300) -> list[tuple[str, str]]:
+        """执行代码并收集输出。
+
+        Args:
+            code: 要执行的 Python 代码。
+            total_timeout: 总超时秒数（默认 300 秒），超时后强制中断内核。
+
+        Returns:
+            (mark, content) 元组列表。
+        """
         assert self.kc is not None
         assert self.km is not None
         self.kc.execute(code)
         logger.info(f"执行代码: {code}")
-        # Get the output of the code
+        start_time = time.time()
         msg_list = []
         while True:
             try:
@@ -153,6 +229,14 @@ class LocalCodeInterpreter(BaseCodeInterpreter):
                 if self.interrupt_signal:
                     self.km.interrupt_kernel()
                     self.interrupt_signal = False
+                if time.time() - start_time > total_timeout:
+                    logger.error(f"代码执行超时（{total_timeout}秒），强制中断内核")
+                    self.km.interrupt_kernel()
+                    msg_list.append({
+                        "msg_type": "stream",
+                        "content": {"name": "stdout", "text": f"\n[错误] 代码执行超时（{total_timeout}秒），已强制中断\n"}
+                    })
+                    break
                 continue
 
         all_output: list[tuple[str, str]] = []
@@ -198,12 +282,14 @@ class LocalCodeInterpreter(BaseCodeInterpreter):
         return all_output
 
     async def get_created_images(self, section: str) -> list[str]:
-        """获取新创建的图片列表"""
+        """获取新创建的图片列表，递归扫描 work_dir 及其子目录（如 figures/）。"""
         current_images = set()
-        files = os.listdir(self.work_dir)
-        for file in files:
-            if file.endswith((".png", ".jpg", ".jpeg")):
-                current_images.add(file)
+        for root, _dirs, files in os.walk(self.work_dir):
+            for file in files:
+                if file.endswith((".png", ".jpg", ".jpeg")):
+                    # 返回相对于 work_dir 的路径，如 "figures/figure1.png"
+                    rel_path = os.path.relpath(os.path.join(root, file), self.work_dir)
+                    current_images.add(rel_path)
 
         # 计算新增的图片
         new_images = current_images - self.last_created_images
@@ -212,7 +298,7 @@ class LocalCodeInterpreter(BaseCodeInterpreter):
         self.last_created_images = current_images
 
         logger.info(f"新创建的图片列表: {new_images}")
-        return list(new_images)  # 最后转换为list返回
+        return list(new_images)
 
     async def cleanup(self):
         # 关闭内核

@@ -1,5 +1,6 @@
 """OpenAlex 学术文献搜索模块。"""
 
+import asyncio
 import requests
 from typing import List, Dict, Any
 from app.services.redis_manager import redis_manager
@@ -99,7 +100,9 @@ class OpenAlexScholar:
         response: requests.Response | None = None
         try:
             print(f"请求 URL: {base_url} 参数: {params}")
-            response = requests.get(base_url, params=params, headers=headers)
+            response = await asyncio.to_thread(
+                requests.get, base_url, params=params, headers=headers
+            )
             print(f"响应状态: {response.status_code}")
 
             response.raise_for_status()

@@ -298,11 +298,11 @@ class E2BCodeInterpreter(BaseCodeInterpreter):
                     self.add_section(section)
                     self.section_output[section]["images"].append(file.name)
 
-            self.created_images = list(
-                set(self.section_output[section]["images"]) - set(self.created_images)
-            )
-            logger.info(f"{section}-获取创建的图片列表: {self.created_images}")
-            return self.created_images
+            current_section_images = set(self.section_output[section]["images"])
+            new_images = list(current_section_images - self.last_created_images)
+            self.last_created_images |= current_section_images
+            logger.info(f"{section}-获取创建的图片列表: {new_images}")
+            return new_images
         except Exception as e:
             logger.error(f"获取创建的图片列表失败: {str(e)}")
             return []

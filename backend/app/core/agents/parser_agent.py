@@ -2,29 +2,24 @@
 
 from app.core.agents.agent import Agent
 from app.core.llm.llm import LLM
-from app.core.prompts.parser import PARSER_PROMPT
+from app.core.skill_loader import skill_loader
 from app.schemas.A2A import ParserToModeler
 from app.utils.log_util import logger
 from app.utils.common_utils import get_current_files
+from app.utils.json_repair import repair_json
+from app.core.functions import AGENT_TOOL_CONFIG
+from app.tools.tool_registry import tool_registry
 import json
 import re
 
 
-def _repair_json(json_str: str) -> dict | None:
-    """尝试修复 LLM 输出的格式错误的 JSON。"""
-    json_str = json_str.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError:
-        pass
-    try:
-        pattern = r'"(\w+)"\s*:\s*"((?:[^"\\]|\\.|"(?!,\s*\n)|"(?!\s*\n\s*}))*)"'
-        matches = re.findall(pattern, json_str, re.DOTALL)
-        if matches:
-            return {k: v.replace('\\"', '"') for k, v in matches}
-    except re.error:
-        pass
-    return None
+def _get_tools_for(agent_name: str) -> list[dict]:
+    """从 AGENT_TOOL_CONFIG 获取 Agent 的工具 schema 列表。"""
+    from app.core.functions import AGENT_TOOL_CONFIG
+    config = AGENT_TOOL_CONFIG.get(agent_name, {"always": [], "optional": []})
+    schemas = tool_registry.get_schemas(config["always"])
+    schemas.extend(tool_registry.get_schemas(config["optional"]))
+    return schemas
 
 
 class ParserAgent(Agent):
@@ -35,13 +30,14 @@ class ParserAgent(Agent):
         task_id: str,
         model: LLM,
         work_dir: str,
-        max_chat_turns: int | None = None,
+        max_chat_turns: int = 3,
         max_retries: int = 5,
     ) -> None:
         super().__init__(task_id, model, max_chat_turns)
         self.work_dir = work_dir
-        self.system_prompt = PARSER_PROMPT
+        self.system_prompt = skill_loader.load("parser", include_references=False)
         self.max_retries = max_retries
+        self.available_tools = _get_tools_for("ParserAgent")
 
     async def run(self, question_text: str) -> ParserToModeler:  # type: ignore[reportIncompatibleMethodOverride]
         """解析题目文本并返回结构化任务描述。
@@ -65,14 +61,34 @@ class ParserAgent(Agent):
         for attempt in range(self.max_retries + 1):
             response = await self.model.chat(
                 history=self.chat_history,
+                tools=self.available_tools if self.available_tools else None,
+                tool_choice="auto" if self.available_tools else None,
                 agent_name=self.__class__.__name__,
             )
 
-            json_str = response.choices[0].message.content
+            msg = response.choices[0].message
+
+            # 处理工具调用（如 read_file）
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                await self.append_chat_history(msg.model_dump())
+                for tc in msg.tool_calls:
+                    t_name = tc.function.name
+                    t_args = json.loads(tc.function.arguments)
+                    try:
+                        result = await tool_registry.dispatch(t_name, t_args, self.task_id)
+                    except ValueError as e:
+                        result = f"工具调用失败: {e}"
+                    await self.append_chat_history({
+                        "role": "tool", "tool_call_id": tc.id,
+                        "name": t_name, "content": result,
+                    })
+                continue
+
+            json_str = msg.content
             if not json_str:
                 raise ValueError("ParserAgent 返回空响应")
 
-            result = _repair_json(json_str)
+            result = repair_json(json_str)
             if result:
                 logger.info(f"ParserAgent 成功解析题目，识别 {result.get('ques_count', '?')} 个子问题")
                 return ParserToModeler(

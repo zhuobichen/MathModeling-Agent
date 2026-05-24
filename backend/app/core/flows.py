@@ -13,14 +13,29 @@ class Flows:
     def get_questions_quesx(self) -> dict[str, str]:
         """过滤出子问题的描述（ques1, ques2, ...）。
 
+        优先从顶层 `ques1`/`ques2` key 读取，
+        兼容从 `sub_problems` 列表中提取。
+
         Returns:
             以 quesX 为键、问题描述为值的字典。
         """
-        return {
+        # 方案A：顶层有 ques1, ques2, ... key（MathModelAgent 格式）
+        result = {
             k: str(v)
             for k, v in self.questions.items()
             if k.startswith("ques") and k[4:].isdigit()
         }
+        if result:
+            return result
+
+        # 方案B：从 sub_problems 列表中提取（我们的 Parser 格式）
+        sub_problems = self.questions.get("sub_problems", [])
+        if isinstance(sub_problems, list):
+            for sp in sub_problems:
+                qid = sp.get("id", 0)
+                question = sp.get("question", "")
+                result[f"ques{qid}"] = str(question)
+        return result
 
     def get_solution_flows(
         self, modeler_response: ModelerToCoder
@@ -99,6 +114,9 @@ class Flows:
         coder_response: str,
         code_interpreter: BaseCodeInterpreter,
         config_template: str = "",
+        model_build_solve: str = "",
+        modeler_solution: str = "",
+        format_output: str = "markdown",
     ) -> str:
         """为 WriterAgent 生成论文章节写作 Prompt。
 
@@ -106,39 +124,156 @@ class Flows:
             key: 章节标识（eda, ques1, ...）。
             coder_response: CoderAgent 的响应文本。
             code_interpreter: 代码解释器，用于获取 section 输出。
-
-        Returns:
-            写作 Prompt。
+            config_template: 该章节的模板。
+            model_build_solve: 所有子问题的建模求解摘要。
+            modeler_solution: 建模手对该子问题的建模方案（含方法选择理由）。
+            format_output: 输出格式（"markdown" 或 "latex"）。
         """
-        code_output = code_interpreter.get_code_output(key)
+        code_output = (
+            code_interpreter.get_code_output(key)
+            if code_interpreter is not None
+            else "(断点恢复，无可用的代码输出缓存)"
+        )
 
-        return f"""## 写作任务: 撰写论文的 [{key}] 部分
+        # 替换模板中的占位符
+        section_template = (config_template or "")
+        if "{模型的建立与求解}" in section_template:
+            section_template = section_template.replace(
+                "{模型的建立与求解}",
+                f"{modeler_solution[:1500]}\n\n{model_build_solve[:2000]}",
+            )
+        if "{题目}" in section_template:
+            section_template = section_template.replace("{题目}", str(self.questions)[:2000])
+        if "{问题}" in section_template:
+            section_template = section_template.replace("{问题}", str(self.questions)[:2000])
 
-### 代码执行结果
-代码响应: {coder_response[:2000]}
+        # LaTeX 模式：将模板中的 Markdown 标题转为 LaTeX 命令
+        if format_output == "latex":
+            section_template = section_template.replace("\n## ", "\n\\subsection{").replace("\n# ", "\n\\section{")
+            # 闭合未闭合的 LaTeX 标题
+            for line in section_template.split("\n"):
+                if line.startswith("\\subsection{") and not line.endswith("}"):
+                    section_template = section_template.replace(line, line + "}")
+                if line.startswith("\\section{") and not line.endswith("}"):
+                    section_template = section_template.replace(line, line + "}")
 
-代码输出: {code_output[:2000]}
+        # 从代码结果+输出中提取关键数值（双重来源确保不遗漏）
+        key_metrics = self._extract_key_metrics(coder_response, code_output)
+        model_description = self._extract_model_description(coder_response)
 
-### 论文模板参考
-{config_template[:1000]}
+        # 章节标题规则
+        chapter_rule = ""
+        if key == "eda":
+            chapter_rule = "\n**注意：你只写 ## 4.2 描述性统计。章标题 # 四、 由 symbol 节负责，你不要重复。**"
+        elif key == "symbol":
+            chapter_rule = "\n**你写 # 四、符号说明与数据预处理 章标题 + ## 4.1 符号说明 小节。**"
+        elif key.startswith("ques"):
+            chapter_rule = (
+                f"\n**注意：你只写 ## 5.{key[4:]} 子节，章标题 # 五、 由系统自动添加。**"
+            )
+        elif key == "sensitivity_analysis":
+            chapter_rule = "\n**你写 # 六、敏感性分析 章标题 + 所有小节。**"
 
-请根据以上代码执行结果，撰写论文对应章节。注意：
-1. 使用段落式写作，避免无序列表
-2. 每张图需要至少100字分析
-3. 遵循去AI味写作规则（不要使用禁用词汇和句式）
-4. 数据要具体，不能笼统描述"""
+        # LaTeX 模式：用户消息不使用任何 Markdown 格式
+        if format_output == "latex":
+            return f"""WRITING TASK: Write the [{key}] section in LaTeX.
+
+MODELING PLAN (why this method was chosen):
+{modeler_solution[:2000]}
+
+TEMPLATE AND STRUCTURE:
+{section_template[:1500]}
+
+MODELS AND METHODS:
+{model_description or "(from code execution results)"}
+
+KEY METRICS AND DATA:
+{key_metrics or "(from code output)"}
+
+CODE OUTPUT:
+{code_output[:1500]}
+
+FIGURES: Use \\includegraphics for each figure. Caption with \\caption.
+
+CRITICAL: Output ONLY LaTeX. Use \\section{{}}, \\subsection{{}}, \\begin{{tabular}}+\\toprule, \\begin{{equation}}, \\textbf{{}}. ABSOLUTELY NO Markdown (#, ##, **, etc.)"""
+        else:
+            return f"""## 写作任务: 撰写论文的 [{key}] 部分
+{chapter_rule}
+
+### 建模方案（建模手的分析——告诉你"为什么选这个方法"）
+{modeler_solution[:2000]}
+
+### 该章节模板与结构要求
+{section_template[:1500]}
+
+### 模型与方法（从代码中提取）
+{model_description or "(从代码执行结果中获取)"}
+
+### ⚠️ 关键指标与数据（必须逐条写入论文，禁止编造或改写数值）⚠️
+以下是代码实际输出的确切数值，你必须原样引用到正文中。
+每条指标后括号内注明"（见代码输出）"，确保与图表数据一致。
+{key_metrics or "(代码输出中无关键指标) "}
+
+### 代码输出详情（补充参考）
+{code_output[:1500]}
+
+### 图注格式要求（强制）
+每张图片插入后，图名必须单独一行，格式：\n**图X: 中文描述**\n图名不加粗、不加特殊格式，紧跟在图片标记下方。
+
+### 输出格式
+使用 Markdown 格式，表格用 HTML <table> 标签。"""
+
+    @staticmethod
+    def _extract_key_metrics(coder_response: str, code_output: str = "") -> str:
+        """从 Coder 响应 + 代码输出中提取关键指标行。
+
+        强制提取所有带数字的结论语句，确保 Writer 拿到的是确切数值。
+        """
+        lines = (coder_response or "").split("\n") + (code_output or "").split("\n")
+        metrics = []
+        for line in lines:
+            lower = line.lower()
+            if any(kw in lower for kw in [
+                "r²", "rmse", "mae", "mse", "accuracy", "准确",
+                "precision", "recall", "f1", "p值", "p-value", "p <", "p=",
+                "系数", "coefficient", "r2", "得分", "score", "auc", "roc",
+                "轮廓", "silhouette", "ari", "nmi", "χ²", "卡方",
+                "= 0.", "=0.", "±", "保留率", "流失率", "缺失率",
+            ]):
+                stripped = line.strip()
+                if stripped and len(stripped) < 200:
+                    metrics.append(stripped)
+            if len(metrics) >= 30:
+                break
+        return "\n".join(metrics[:30]) if metrics else ""
+
+    @staticmethod
+    def _extract_model_description(coder_response: str) -> str:
+        """从 Coder 响应中提取模型描述行。"""
+        if not coder_response:
+            return ""
+        lines = coder_response.split("\n")
+        desc = []
+        for line in lines:
+            lower = line.lower()
+            if any(kw in lower for kw in ["=== ", "模型", "model", "方法", "method",
+                "算法", "algorithm", "评估", "evaluation", "验证", "validation"]):
+                desc.append(line.strip())
+            if len(desc) >= 15:
+                break
+        return "\n".join(desc[:15]) if desc else ""
 
     def get_write_flows(
         self,
         user_output,
-        config_template: str,
+        config_template: dict[str, str],
         background: str,
     ) -> dict[str, dict]:
         """生成论文结构性章节的写作任务。
 
         Args:
             user_output: UserOutput 实例。
-            config_template: 论文模板。
+            config_template: 论文模板字典，key 为章节名，value 为模板内容。
             background: 题目背景。
 
         Returns:
@@ -146,53 +281,57 @@ class Flows:
         """
         model_build_solve = user_output.get_model_build_solve()
 
+        def _fill_template(key: str) -> str:
+            """读取模板并替换占位符。"""
+            tpl = config_template.get(key, "")
+            tpl = tpl.replace("{模型的建立与求解}", model_build_solve[:3000])
+            tpl = tpl.replace("{题目}", background[:2000])
+            tpl = tpl.replace("{问题}", background[:2000])
+            return tpl
+
         flows = {
             "firstPage": {
                 "writer_prompt": f"""## 写作任务: 撰写论文首页（标题+摘要+关键词）
 
-### 题目背景
-{background[:500]}
-
-### 建模与求解摘要
-{model_build_solve[:1000]}
-
-### 模板
-{config_template.get('firstPage', '')[:1000]}
+{_fill_template('firstPage')}
 
 请撰写论文首页，包含标题、摘要（300-500字，结构: 问题→方法→结果→结论）和3-5个关键词。"""
             },
             "RepeatQues": {
                 "writer_prompt": f"""## 写作任务: 问题重述
 
-### 题目背景
-{background[:500]}
+{_fill_template('RepeatQues')}
 
 请用自己的话重述题目，不要直接复制原文，200-300字。"""
             },
             "analysisQues": {
                 "writer_prompt": f"""## 写作任务: 问题分析
 
-### 题目背景
-{background[:500]}
+{_fill_template('analysisQues')}
 
 请分析每个子问题的类型、难点和整体求解思路。"""
             },
             "modelAssumption": {
-                "writer_prompt": """## 写作任务: 模型假设
+                "writer_prompt": f"""## 写作任务: 模型假设
+
+{_fill_template('modelAssumption')}
 
 请列出3-5条合理的模型假设，每条假设说明理由。使用有序列表格式。"""
             },
             "symbol": {
-                "writer_prompt": """## 写作任务: 符号说明
+                "writer_prompt": f"""## 写作任务: 符号说明
 
-请制作符号表（三线表格式），包含符号、含义、单位。"""
+{_fill_template('symbol')}
+
+**你只写 ## 4.1 符号说明 小节，不要写 ## 4.2 描述性统计。**
+用 HTML <table> 语法制作符号表，列：符号 | 含义 | 单位，符号用 $...$ 包裹。"""
             },
             "judge": {
                 "writer_prompt": f"""## 写作任务: 模型评价与改进
 
-### 建模方案
-{model_build_solve[:1000]}
+{_fill_template('judge')}
 
+**你写 # 七、模型评价与改进 章标题 + 所有小节。**
 请撰写模型评价章节，包括：
 1. 模型优点（3-4条，每条结合具体数据）
 2. 模型缺点（2-3条，诚实评估）

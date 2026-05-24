@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     EVALUATOR_MODEL: Optional[str] = None
     EVALUATOR_BASE_URL: Optional[str] = None
 
+    # ----- 并行化配置 -----
+    WRITER_PARALLEL_ENABLED: bool = True  # WriterAgent 独立章节并行写作
+
     # ----- Feedback Rerun 配置 -----
     MAX_FEEDBACK_ROUNDS: int = 2
     EVALUATION_THRESHOLD: float = 0.6
@@ -93,6 +96,9 @@ class Settings(BaseSettings):
     MAX_RETRIES: int = 3
     MAX_MODELER_RETRIES: int = 3
     E2B_API_KEY: Optional[str] = None
+    CODE_INTERPRETER: str = "local"  # local | docker | e2b
+    DOCKER_MEM_LIMIT: str = "2g"
+    DOCKER_CPU_LIMIT: float = 1.0
     LOG_LEVEL: str = "DEBUG"
     DEBUG: bool = True
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -108,11 +114,15 @@ class Settings(BaseSettings):
     SEARCH_ENABLED: bool = True
 
     # ----- RAG 知识库配置 -----
-    RAG_ENABLED: bool = False
+    RAG_ENABLED: bool = True
     RAG_DB_PATH: str = "data/chromadb"
     RAG_TOP_K: int = 5
     RAG_EMBEDDING_MODEL: str = "BAAI/bge-m3"
     RAG_RERANKER_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    RAG_CACHE_ENABLED: bool = True      # 检索结果缓存开关
+    RAG_CACHE_TTL: int = 3600           # 缓存过期时间（秒）
+    RAG_EXPANSION_ENABLED: bool = True  # 查询扩展开关（需 LLM）
+    RAG_EXPANSION_COUNT: int = 3        # 查询扩展变体数量
 
     # ----- 识图模型配置（PDF 图片识别）-----
     VISION_API_KEY: Optional[str] = None

@@ -127,7 +127,7 @@ async def recognize_images(images: list[dict], context: str = "") -> str:
         client = OpenAI(api_key=api_key, base_url=base_url)
         # 在线程池中运行同步 OpenAI 调用，避免阻塞事件循环
         import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
             lambda: client.chat.completions.create(

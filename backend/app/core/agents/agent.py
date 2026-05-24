@@ -3,7 +3,6 @@
 from typing import Any
 from app.core.llm.llm import LLM, simple_chat
 from app.utils.log_util import logger
-from icecream import ic  # type: ignore[import-unresolved]
 
 # TODO: Memory 的管理
 # TODO: 评估任务完成情况，rethinking
@@ -65,26 +64,26 @@ class Agent:
         Args:
             msg: 消息字典，需包含 role 和 content 字段。
         """
-        ic(f"添加消息: role={msg.get('role')}, 当前历史长度={len(self.chat_history)}")
+        logger.debug(f"添加消息: role={msg.get('role')}, 当前历史长度={len(self.chat_history)}")
         self.chat_history.append(msg)
-        ic(f"添加后历史长度={len(self.chat_history)}")
+        logger.debug(f"添加后历史长度={len(self.chat_history)}")
 
         # 只有在添加非tool消息时才进行内存清理，避免在工具调用期间破坏消息结构
         if msg.get("role") != "tool":
-            ic("触发内存清理")
+            logger.debug("触发内存清理")
             await self.clear_memory()
         else:
-            ic("跳过内存清理(tool消息)")
+            logger.debug("跳过内存清理(tool消息)")
 
     async def clear_memory(self):
         """当聊天历史超过最大记忆轮次时，使用 simple_chat 进行总结压缩。"""
-        ic(f"检查内存清理: 当前={len(self.chat_history)}, 最大={self.max_memory}")
+        logger.debug(f"检查内存清理: 当前={len(self.chat_history)}, 最大={self.max_memory}")
 
         if len(self.chat_history) <= self.max_memory:
-            ic("无需清理内存")
+            logger.debug("无需清理内存")
             return
 
-        ic("开始内存清理")
+        logger.debug("开始内存清理")
         logger.info(
             f"{self.__class__.__name__}:开始清除记忆，当前记录数：{len(self.chat_history)}"
         )
@@ -99,12 +98,12 @@ class Agent:
 
             # 查找需要保留的消息范围 - 保留最后几条完整的对话和工具调用
             preserve_start_idx = self._find_safe_preserve_point()
-            ic(f"保留起始索引: {preserve_start_idx}")
+            logger.debug(f"保留起始索引: {preserve_start_idx}")
 
             # 确定需要总结的消息范围
             start_idx = 1 if system_msg else 0
             end_idx = preserve_start_idx
-            ic(f"总结范围: {start_idx} -> {end_idx}")
+            logger.debug(f"总结范围: {start_idx} -> {end_idx}")
 
             if end_idx > start_idx:
                 # 构造总结提示
@@ -135,7 +134,7 @@ class Agent:
                 new_history.extend(self.chat_history[preserve_start_idx:])
 
                 self.chat_history = new_history
-                ic(f"内存清理完成，新历史长度: {len(self.chat_history)}")
+                logger.debug(f"内存清理完成，新历史长度: {len(self.chat_history)}")
                 logger.info(
                     f"{self.__class__.__name__}:记忆清除完成，压缩至：{len(self.chat_history)}条记录"
                 )
@@ -153,7 +152,7 @@ class Agent:
         # 最少保留最后3条消息，确保基本对话完整性
         min_preserve = min(3, len(self.chat_history))
         preserve_start = len(self.chat_history) - min_preserve
-        ic(
+        logger.debug(
             f"寻找安全保留点: 历史长度={len(self.chat_history)}, 最少保留={min_preserve}, 开始位置={preserve_start}"
         )
 
@@ -164,20 +163,20 @@ class Agent:
 
             # 检查从这个位置开始是否是安全的（没有孤立的tool消息）
             is_safe = self._is_safe_cut_point(i)
-            ic(f"检查位置 {i}: 安全={is_safe}")
+            logger.debug(f"检查位置 {i}: 安全={is_safe}")
             if is_safe:
-                ic(f"找到安全保留点: {i}")
+                logger.debug(f"找到安全保留点: {i}")
                 return i
 
         # 如果找不到安全点，至少保留最后1条消息
         fallback = len(self.chat_history) - 1
-        ic(f"未找到安全点，使用备用位置: {fallback}")
+        logger.debug(f"未找到安全点，使用备用位置: {fallback}")
         return fallback
 
     def _is_safe_cut_point(self, start_idx: int) -> bool:
         """检查从指定位置开始切割是否安全（不会产生孤立的tool消息）"""
         if start_idx >= len(self.chat_history):
-            ic(f"切割点 {start_idx} >= 历史长度，安全")
+            logger.debug(f"切割点 {start_idx} >= 历史长度，安全")
             return True
 
         # 检查切割后的消息序列是否有孤立的tool消息
@@ -187,7 +186,7 @@ class Agent:
             if isinstance(msg, dict) and msg.get("role") == "tool":
                 tool_call_id = msg.get("tool_call_id")
                 tool_messages.append((i, tool_call_id))
-                ic(f"发现tool消息在位置 {i}, tool_call_id={tool_call_id}")
+                logger.debug(f"发现tool消息在位置 {i}, tool_call_id={tool_call_id}")
 
                 # 向前查找对应的tool_calls消息
                 if tool_call_id:
@@ -202,18 +201,18 @@ class Agent:
                             for tool_call in prev_msg["tool_calls"]:
                                 if tool_call.get("id") == tool_call_id:
                                     found_tool_call = True
-                                    ic(f"找到对应的tool_call在位置 {j}")
+                                    logger.debug(f"找到对应的tool_call在位置 {j}")
                                     break
                             if found_tool_call:
                                 break
 
                     if not found_tool_call:
-                        ic(
+                        logger.debug(
                             f"❌ tool消息 {tool_call_id} 没有找到对应的tool_call，切割点不安全"
                         )
                         return False
 
-        ic(f"切割点 {start_idx} 安全，检查了 {len(tool_messages)} 个tool消息")
+        logger.debug(f"切割点 {start_idx} 安全，检查了 {len(tool_messages)} 个tool消息")
         return True
 
     def _get_safe_fallback_history(self) -> list:
@@ -241,45 +240,6 @@ class Agent:
                 break
 
         return safe_history
-
-    def _find_last_unmatched_tool_call(self) -> int | None:
-        """查找最后一个未匹配的tool call的索引"""
-        ic("开始查找未匹配的tool_call")
-
-        # 从后往前查找，寻找没有对应tool response的tool call
-        for i in range(len(self.chat_history) - 1, -1, -1):
-            msg = self.chat_history[i]
-
-            # 检查是否是包含tool_calls的消息
-            if isinstance(msg, dict) and "tool_calls" in msg and msg["tool_calls"]:
-                ic(f"在位置 {i} 发现tool_calls消息")
-
-                # 检查每个tool call是否都有对应的response
-                for tool_call in msg["tool_calls"]:
-                    tool_call_id = tool_call.get("id")
-                    ic(f"检查tool_call_id: {tool_call_id}")
-
-                    if tool_call_id:
-                        # 在后续消息中查找对应的tool response
-                        response_found = False
-                        for j in range(i + 1, len(self.chat_history)):
-                            response_msg = self.chat_history[j]
-                            if (
-                                isinstance(response_msg, dict)
-                                and response_msg.get("role") == "tool"
-                                and response_msg.get("tool_call_id") == tool_call_id
-                            ):
-                                ic(f"找到匹配的tool响应在位置 {j}")
-                                response_found = True
-                                break
-
-                        if not response_found:
-                            # 找到未匹配的tool call
-                            ic(f"❌ 发现未匹配的tool_call在位置 {i}, id={tool_call_id}")
-                            return i
-
-        ic("没有发现未匹配的tool_call")
-        return None
 
     def _format_history_for_summary(self, history: list[dict]) -> str:
         """格式化历史记录用于总结"""

@@ -8,10 +8,10 @@ from app.schemas.response import SystemMessage, InterpreterMessage
 from app.tools.base_interpreter import BaseCodeInterpreter
 from app.core.llm.llm import LLM
 from app.schemas.A2A import CoderToWriter
-from app.core.prompts.coder import CODER_PROMPT, get_validation_prompt
+from app.core.skill_loader import skill_loader
 from app.utils.common_utils import get_current_files
 import json
-from app.core.prompts.shared import get_reflection_prompt
+from app.core.prompts.shared import ErrorClassifier, get_reflection_prompt
 from app.core.functions import coder_tools
 from app.tools.tool_registry import tool_registry
 
@@ -32,9 +32,14 @@ class CoderAgent(Agent):
         self.work_dir = work_dir
         self.max_retries = max_retries
         self.is_first_run = True
-        self.system_prompt = CODER_PROMPT
+        import platform
+        self.system_prompt = skill_loader.load("coder", include_references=False, PLATFORM=platform.system())
         self.code_interpreter = code_interpreter
-        self.available_tools = coder_tools
+        # 核心工具 + 按需工具
+        self.available_tools = list(coder_tools)
+        from app.core.functions import AGENT_TOOL_CONFIG
+        config = AGENT_TOOL_CONFIG.get("CoderAgent", {"always": [], "optional": []})
+        self.available_tools.extend(tool_registry.get_schemas(config["optional"]))
 
     async def run(self, prompt: str, subtask_title: str) -> CoderToWriter:  # type: ignore[reportIncompatibleMethodOverride]
         """执行代码子任务，包含错误自纠和结果验证。
@@ -76,7 +81,11 @@ class CoderAgent(Agent):
                 )
 
             if self.max_chat_turns is not None and self.current_chat_turns >= self.max_chat_turns:
-                raise Exception(f"超过最大对话轮次({self.max_chat_turns})")
+                logger.error(f"超过最大对话轮次({self.max_chat_turns})")
+                return CoderToWriter(
+                    code_response=f"任务失败，超过最大对话轮次{self.max_chat_turns}",
+                    created_images=[],
+                )
 
             self.current_chat_turns += 1
 
@@ -92,72 +101,72 @@ class CoderAgent(Agent):
                     hasattr(response.choices[0].message, "tool_calls")
                     and response.choices[0].message.tool_calls
                 ):
-                    tool_call = response.choices[0].message.tool_calls[0]
-                    tool_id = tool_call.id
-                    tool_name = tool_call.function.name
-                    tool_args = json.loads(tool_call.function.arguments)
-
                     await self.append_chat_history(
                         response.choices[0].message.model_dump()
                     )
 
-                    if tool_name == "execute_code":
-                        code = tool_args["code"]
-                        await redis_manager.publish_message(
-                            self.task_id,
-                            InterpreterMessage(input={"code": code}),
-                        )
+                    for tool_call in response.choices[0].message.tool_calls:
+                        tool_id = tool_call.id
+                        tool_name = tool_call.function.name
+                        tool_args = json.loads(tool_call.function.arguments)
 
-                        text_to_gpt, error_occurred, error_message = (
-                            await self.code_interpreter.execute_code(code)
-                        )
+                        if tool_name == "execute_code":
+                            code = tool_args["code"]
+                            await redis_manager.publish_message(
+                                self.task_id,
+                                InterpreterMessage(input={"code": code}),
+                            )
 
-                        if error_occurred:
-                            await self.append_chat_history(
-                                {
+                            text_to_gpt, error_occurred, error_message = (
+                                await self.code_interpreter.execute_code(code)
+                            )
+
+                            if error_occurred:
+                                await self.append_chat_history({
                                     "role": "tool",
                                     "tool_call_id": tool_id,
                                     "name": "execute_code",
                                     "content": error_message,
-                                }
-                            )
-                            retry_count += 1
-                            last_error_message = error_message
-                            reflection_prompt = get_reflection_prompt(error_message, code)
-                            await redis_manager.publish_message(
-                                self.task_id,
-                                SystemMessage(content="CoderAgent 反思纠错", type="error"),
-                            )
-                            await self.append_chat_history(
-                                {"role": "user", "content": reflection_prompt}
-                            )
-                            continue
-                        else:
-                            await self.append_chat_history(
-                                {
+                                })
+                                retry_count += 1
+                                last_error_message = error_message
+                                error_type, suggestion = ErrorClassifier.classify(error_message)
+                                logger.warning(
+                                    f"代码执行错误 [{error_type}] (重试 {retry_count}/{self.max_retries}): "
+                                    f"{error_message[:200]}"
+                                )
+                                reflection_prompt = get_reflection_prompt(
+                                    error_message, code, error_type, suggestion,
+                                )
+                                await redis_manager.publish_message(
+                                    self.task_id,
+                                    SystemMessage(content="CoderAgent 反思纠错", type="error"),
+                                )
+                                await self.append_chat_history(
+                                    {"role": "user", "content": reflection_prompt}
+                                )
+                            else:
+                                await self.append_chat_history({
                                     "role": "tool",
                                     "tool_call_id": tool_id,
                                     "name": "execute_code",
                                     "content": text_to_gpt,
-                                }
-                            )
-                            continue
-                    else:
-                        try:
-                            result = await tool_registry.dispatch(
-                                tool_name, tool_args, self.task_id
-                            )
-                        except ValueError as e:
-                            result = f"工具调用失败: {e}"
-                        await self.append_chat_history(
-                            {
+                                })
+                        else:
+                            try:
+                                result = await tool_registry.dispatch(
+                                    tool_name, tool_args, self.task_id
+                                )
+                            except ValueError as e:
+                                result = f"工具调用失败: {e}"
+                            await self.append_chat_history({
                                 "role": "tool",
                                 "tool_call_id": tool_id,
                                 "name": tool_name,
                                 "content": result,
-                            }
-                        )
-                        continue
+                            })
+                    # 所有 tool_calls 已处理，继续下一轮 LLM 对话
+                    continue
                 else:
                     logger.info(f"CoderAgent 子任务完成: {subtask_title}")
                     return CoderToWriter(

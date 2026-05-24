@@ -2,28 +2,13 @@
 
 from app.core.agents.agent import Agent
 from app.core.llm.llm import LLM
-from app.core.prompts.reviewer import REVIEWER_PROMPT
+from app.core.skill_loader import skill_loader
 from app.schemas.A2A import ReviewerResult
 from app.utils.log_util import logger
+from app.utils.json_repair import repair_json
+from app.tools.tool_registry import tool_registry
 import json
 import re
-
-
-def _repair_json(json_str: str) -> dict | None:
-    """尝试修复 LLM 输出的格式错误的 JSON。"""
-    json_str = json_str.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError:
-        pass
-    try:
-        pattern = r'"(\w+)"\s*:\s*"((?:[^"\\]|\\.|"(?!,\s*\n)|"(?!\s*\n\s*}))*)"'
-        matches = re.findall(pattern, json_str, re.DOTALL)
-        if matches:
-            return {k: v.replace('\\"', '"') for k, v in matches}
-    except re.error:
-        pass
-    return None
 
 
 class ReviewerAgent(Agent):
@@ -37,8 +22,9 @@ class ReviewerAgent(Agent):
         max_retries: int = 3,
     ) -> None:
         super().__init__(task_id, model, max_chat_turns)
-        self.system_prompt = REVIEWER_PROMPT
+        self.system_prompt = skill_loader.get_system_prompt("reviewer")
         self.max_retries = max_retries
+        self.available_tools = tool_registry.get_schemas(["search_papers"])
 
     async def run(self, paper_content: str, task_summary: str = "") -> ReviewerResult:  # type: ignore[reportIncompatibleMethodOverride]
         """评审论文质量。
@@ -54,9 +40,9 @@ class ReviewerAgent(Agent):
             {"role": "system", "content": self.system_prompt}
         )
 
-        # 截断过长的论文内容（保留前 8000 字和后 2000 字）
-        if len(paper_content) > 10000:
-            truncated = paper_content[:8000] + "\n...(中间内容省略)...\n" + paper_content[-2000:]
+        # 截断过长的论文内容（保留前 35000 字和后 5000 字）
+        if len(paper_content) > 40000:
+            truncated = paper_content[:35000] + "\n...(中间内容省略)...\n" + paper_content[-5000:]
         else:
             truncated = paper_content
 
@@ -66,6 +52,8 @@ class ReviewerAgent(Agent):
         for attempt in range(self.max_retries + 1):
             response = await self.model.chat(
                 history=self.chat_history,
+                tools=self.available_tools if self.available_tools else None,
+                tool_choice="auto" if self.available_tools else None,
                 agent_name=self.__class__.__name__,
             )
 
@@ -73,7 +61,7 @@ class ReviewerAgent(Agent):
             if not json_str:
                 raise ValueError("ReviewerAgent 返回空响应")
 
-            result = _repair_json(json_str)
+            result = repair_json(json_str)
             if result:
                 logger.info(f"ReviewerAgent 评审完成，综合评分: {result.get('overall_score', '?')}")
                 return ReviewerResult(
