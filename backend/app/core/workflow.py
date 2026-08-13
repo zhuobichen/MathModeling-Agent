@@ -25,6 +25,10 @@ from app.tools.notebook_serializer import NotebookSerializer
 from app.tools.openalex_scholar import OpenAlexScholar
 from app.tools.tool_registry import tool_registry
 from app.tools.knowledge_retriever import KnowledgeRetriever
+from app.tools.handlers.install_package import _handle_install_package
+from app.tools.handlers.read_file import _handle_read_file
+from app.tools.handlers.search_knowledge import _handle_search_knowledge
+from app.tools.handlers.search_papers import _handle_search_papers
 from app.core.functions import search_web_tool, search_knowledge_tool, read_file_tool, install_package_tool, search_papers_tool
 from app.core.postprocess import (
     _assign_images_to_sections,
@@ -1540,69 +1544,10 @@ def _write_paper_clean(content: str, work_dir: str) -> None:
         f.write(content)
 
 
-async def _handle_read_file(args: dict, work_dir: str) -> str:
-    """read_file 工具处理器。"""
-    import pandas as pd
-    filename = args.get("filename", "")
-    n_rows = args.get("n_rows", 20)
-    sheet_name = args.get("sheet_name") or 0
-    filepath = os.path.join(work_dir, filename)
-
-    if not os.path.exists(filepath):
-        return f"错误: 文件 '{filename}' 不存在于工作目录"
-
-    try:
-        if filename.lower().endswith((".xlsx", ".xls")):
-            xl = pd.ExcelFile(filepath)
-            # 列出所有sheet信息
-            sheets_info = [f"Sheet {i}: '{s}' ({xl.parse(s).shape[0]}行 x {xl.parse(s).shape[1]}列)" for i, s in enumerate(xl.sheet_names)]
-            # 选择指定sheet
-            if isinstance(sheet_name, str) and sheet_name.isdigit():
-                sheet_name = int(sheet_name)
-            if isinstance(sheet_name, int):
-                sname = xl.sheet_names[sheet_name]
-            else:
-                sname = sheet_name if sheet_name in xl.sheet_names else xl.sheet_names[0]
-            df = xl.parse(sname).head(n_rows)
-            col_names = list(df.columns)
-            return f"Excel文件, {len(xl.sheet_names)}个sheet:\n" + "\n".join(sheets_info) + f"\n\n读取 sheet '{sname}' 前{n_rows}行 (共{df.shape[0]}行 x {df.shape[1]}列):\n列名: {col_names}\n\n" + df.to_string()
-        else:
-            df = pd.read_csv(filepath, nrows=n_rows) if filename.endswith(".csv") else pd.read_table(filepath, nrows=n_rows)
-            return f"文件前{n_rows}行 ({df.shape[0]}行 x {df.shape[1]}列):\n" + df.to_string()
-    except Exception as e:
-        return f"读取失败: {e}"
 
 
-async def _handle_install_package(args: dict) -> str:
-    """install_package 工具处理器。"""
-    import subprocess, sys
-    package = args.get("package", "")
-    if not package:
-        return "错误: 未指定包名"
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", package],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode == 0:
-            logger.info(f"pip install {package} 成功")
-            return f"成功安装 {package}\n{result.stdout[-500:]}"
-        else:
-            return f"安装失败: {result.stderr[-500:]}"
-    except Exception as e:
-        return f"安装异常: {e}"
 
 
-async def _handle_search_papers(args: dict, scholar) -> str:
-    """search_papers 工具处理器。"""
-    query = args.get("query", "")
-    if not query:
-        return "错误: 未指定搜索查询"
-    try:
-        papers = await scholar.search_papers(query)
-        return scholar.papers_to_str(papers) if papers else "未找到相关文献"
-    except Exception as e:
-        return f"文献搜索失败: {e}"
 
 
 async def _verify_figures_with_vl(
@@ -1684,21 +1629,3 @@ async def _verify_figures_with_vl(
     return results
 
 
-async def _handle_search_knowledge(args: dict, retriever) -> str:
-    """search_knowledge 工具处理器。"""
-    query = args.get("query", "")
-    scope = args.get("scope", "method")
-    method_name = args.get("method_name", "")
-
-    results = await retriever.retrieve(
-        query=query,
-        top_k=5,
-        source_type=scope if scope != "all" else None,
-        method_name=method_name if method_name else None,
-    )
-    if not results:
-        return "未找到相关知识"
-
-    return "\n\n".join(
-        f"### {r.method_name}\n{r.content[:800]}" for r in results
-    )
