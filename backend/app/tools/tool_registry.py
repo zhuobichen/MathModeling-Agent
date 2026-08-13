@@ -64,3 +64,12 @@ class ToolRegistry:
 
 # 全局单例
 tool_registry = ToolRegistry()
+
+
+def _get_tools_for(agent_name: str) -> list[dict]:
+    """从 AGENT_TOOL_CONFIG 获取 Agent 的工具 schema 列表。"""
+    from app.core.functions import AGENT_TOOL_CONFIG
+    config = AGENT_TOOL_CONFIG.get(agent_name, {"always": [], "optional": []})
+    schemas = tool_registry.get_schemas(config["always"])
+    schemas.extend(tool_registry.get_schemas(config["optional"]))
+    return schemas

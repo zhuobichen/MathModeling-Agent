@@ -8,19 +8,10 @@ from app.schemas.A2A import ParserToModeler, ModelerToCoder
 from app.services.redis_manager import redis_manager
 from app.schemas.response import SystemMessage
 from app.utils.log_util import logger
-from app.tools.tool_registry import tool_registry
+from app.tools.tool_registry import tool_registry, _get_tools_for
 import json
 
 from app.utils.json_repair import repair_json
-
-
-def _get_tools_for(agent_name: str) -> list[dict]:
-    """从 AGENT_TOOL_CONFIG 获取 Agent 的工具 schema 列表。"""
-    from app.core.functions import AGENT_TOOL_CONFIG
-    config = AGENT_TOOL_CONFIG.get(agent_name, {"always": [], "optional": []})
-    schemas = tool_registry.get_schemas(config["always"])
-    schemas.extend(tool_registry.get_schemas(config["optional"]))
-    return schemas
 
 
 class ModelerAgent(Agent):
@@ -93,8 +84,6 @@ class ModelerAgent(Agent):
         tools: list[dict] | None = None,
     ) -> ModelerToCoder:
         """支持工具调用（知识库搜索）的建模方案生成。"""
-        from app.tools.tool_registry import tool_registry
-
         await self.append_chat_history(
             {"role": "system", "content": self.system_prompt}
         )

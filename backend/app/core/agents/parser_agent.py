@@ -7,19 +7,9 @@ from app.schemas.A2A import ParserToModeler
 from app.utils.log_util import logger
 from app.utils.common_utils import get_current_files
 from app.utils.json_repair import repair_json
-from app.core.functions import AGENT_TOOL_CONFIG
-from app.tools.tool_registry import tool_registry
+from app.tools.tool_registry import tool_registry, _get_tools_for
 import json
 import re
-
-
-def _get_tools_for(agent_name: str) -> list[dict]:
-    """从 AGENT_TOOL_CONFIG 获取 Agent 的工具 schema 列表。"""
-    from app.core.functions import AGENT_TOOL_CONFIG
-    config = AGENT_TOOL_CONFIG.get(agent_name, {"always": [], "optional": []})
-    schemas = tool_registry.get_schemas(config["always"])
-    schemas.extend(tool_registry.get_schemas(config["optional"]))
-    return schemas
 
 
 class ParserAgent(Agent):
