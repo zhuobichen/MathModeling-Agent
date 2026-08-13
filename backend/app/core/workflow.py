@@ -1,6 +1,5 @@
 """MathModel 5-Agent 流水线编排模块，支持断点续跑。"""
 
-import asyncio
 import json
 import os
 import shutil
@@ -1046,61 +1045,6 @@ class MathModelWorkFlow:
             failed_sections = {"RepeatQues", "analysisQues"}
         
         return list(failed_sections)
-
-    async def _write_sections_parallel(
-        self, writer_llm, fallbacks, sections: dict,
-        coder_results: dict, modeler_result: ModelerToCoder,
-        interpreter, config_template: dict,
-        model_build_solve: str, flows: Flows,
-    ) -> list[tuple[str, WriterResponse]]:
-        """并行执行独立章节写作。
-
-        为每个章节创建独立的 WriterAgent 实例，通过 asyncio.gather 并行执行。
-        各章节间无数据依赖，并行写作可将该阶段耗时降低 50-70%。
-
-        Returns:
-            [(key, WriterResponse), ...] 保持输入顺序的结果列表。
-        """
-        # 扫描工作目录所有图片，弥补 CoderAgent 图片追踪缺失的问题
-        all_images = _scan_work_dir_images(self.work_dir)
-
-        async def _write_one(key: str, flow_info: dict) -> tuple[str, WriterResponse]:
-            coder_writer = coder_results.get(key, CoderToWriter())
-            # 按文件名前缀匹配，每个章节只拿自己相关的图
-            section_images = _assign_images_to_section(
-                key, all_images, coder_writer.created_images,
-            )
-            modeler_solution = modeler_result.questions_solution.get(key, "")
-            writer_prompt = flows.get_writer_prompt(
-                key, coder_writer.code_response or "", interpreter,
-                config_template.get(key, ""),
-                model_build_solve,
-                modeler_solution,
-                format_output=str(getattr(self, '_format_output', 'markdown')),
-            )
-            writer_prompt = self._context_anchor + writer_prompt
-            # 每个并行任务创建独立的 WriterAgent，避免 chat_history 共享
-            section_writer = WriterAgent(
-                task_id=self.task_id, model=writer_llm,
-                comp_template=CompTemplate.CHINA,
-                format_output=getattr(self, '_format_output', FormatOutPut.Markdown),
-            )
-            try:
-                wr = await self._run_with_handoff(
-                    section_writer, "run",
-                    (writer_prompt, section_images, key),
-                    "writer", fallbacks.get("writer"),
-                    WriterAgent, {"task_id": self.task_id},
-                )
-                return key, wr
-            except Exception as e:
-                logger.exception(f"章节 {key} 并行写作失败: {e}")
-                return key, WriterResponse(response_content=f"写作失败: {e}")
-
-        # asyncio.gather 按顺序返回（即使内部并发执行）
-        return list(await asyncio.gather(*[
-            _write_one(key, flow_info) for key, flow_info in sections.items()
-        ]))
 
     # ---- 人工审核机制 ----
 
