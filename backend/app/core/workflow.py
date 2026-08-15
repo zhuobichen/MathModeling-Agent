@@ -78,8 +78,12 @@ class MathModelWorkFlow:
         if resume:
             return await self.resume_execute(resume, data_dir, format_output)
 
-        self.task_id = create_task_id()
-        self.work_dir = str(Path("project/work_dir") / self.task_id)
+        # 若调用方（如 Web API 路由）已预置 task_id / work_dir，则沿用，避免覆盖导致
+        # task_store 记录与实际输出目录不一致（GET /task/{id} 查不到文件）。
+        if not getattr(self, "task_id", None):
+            self.task_id = create_task_id()
+        if not getattr(self, "work_dir", None):
+            self.work_dir = str(Path("project/work_dir") / self.task_id)
         self._format_output = format_output
         self._review_enabled = review_enabled
         os.makedirs(self.work_dir, exist_ok=True)
