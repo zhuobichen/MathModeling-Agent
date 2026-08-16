@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 
 # TODO: 记录数据
+# 已弃用，未使用：DataRecorder 从未被实例化，仅作为 user_output.py 的类型标注保留
 class DataRecorder:
     """记录 Agent 对话历史、Token 使用量和 API 调用费用。"""
     def __init__(self, log_work_dir: str = ""):
