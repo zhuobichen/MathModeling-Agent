@@ -98,6 +98,7 @@ class Robot:
         self.empty = set()                         # 已确认无源的频道
         self.cleared = []
         self.n_measure = 0
+        self.tries = {}                            # 频道→逼近失败次数
         self.trace = []
         self.record = log if log is not None else []
 
@@ -387,3 +388,105 @@ def run_tour(self, verbose=False):
 
 
 Robot.run_tour = run_tour
+
+
+# ══════════════════════════════════════════════════════════
+def run_rho(self, survey_pts=None, verbose=False):
+    """滚动时域重优化（RHO）巡线。
+
+    每个决策时刻把「未访问侦察点 ∪ 已定位未清除源」当作一个在线 TSP，
+    用最近邻 + 2-opt 重解，**只执行第一条腿**，拿到新观测后立即重规划。
+    与 run() 的差别在于：侦察与清除不再分成两段长途，而是合成一条巡线，
+    从而消除"先绕环一周、再折返清源"的重复行程。
+    """
+    sim = self.sim
+    sim.entered = True
+    pts = [np.asarray(p, float) for p in
+           (survey_pts if survey_pts is not None else survey_ring(6, margin=0.70))]
+    pending = list(pts)
+    guard = 0
+    while True:
+        guard += 1
+        if guard > 20000:
+            break
+        jobs = [("sweep", i, pending[i]) for i in range(len(pending))]
+        jobs += [("clear", c, self.est[c][0]) for c in self.est
+                 if c not in self.empty]
+        if not jobs:
+            break
+        order = route_nn(sim.pos, [j[2] for j in jobs])
+        kind, ref, pos = jobs[order[0]]
+        if kind == "sweep":
+            self.sweep(pos)
+            del pending[ref]
+        else:
+            ch = ref
+            if ch not in self.empty:
+                self.approach_and_clear(ch)
+            if ch not in self.empty:
+                # 不能一次失败就放弃：定向源从背面逼近会 no_signal，
+                # 多试几次（每次都会换一个"曾看到过"的起点）再放弃。
+                self.tries[ch] = self.tries.get(ch, 0) + 1
+                if self.tries[ch] >= 3:
+                    self.empty.add(ch)
+        if verbose:
+            print(f"   {kind} ({pos[0]:.0f},{pos[1]:.0f}) "
+                  f"t={sim.virtual_time:.0f}s 已清 {len(self.cleared)}")
+    return sim.stats(0.0)
+
+
+Robot.run_rho = run_rho
+
+
+# ══════════════════════════════════════════════════════════
+def angular_order(pts, start_from):
+    """按极角排序成一圈，并从离 start_from 最近的点起绕。"""
+    P = [np.asarray(p, float) for p in pts]
+    P = sorted(P, key=lambda p: math.atan2(p[1], p[0]))
+    if not P:
+        return P
+    i = min(range(len(P)), key=lambda k: np.linalg.norm(P[k] - start_from))
+    return P[i:] + P[:i]
+
+
+def run_ring2(self, survey_pts=None, verbose=False):
+    """侦察按「外环一圈 + 径向连接 + 内环一圈」走，避免内外环之间来回穿插。
+
+    动机：混合半径的"就近跳"巡线会在内外环之间反复穿插，把行程放大近一倍。
+    按极角各自绕一圈只需两条环的周长加两次径向连接。
+    """
+    sim = self.sim
+    sim.entered = True
+    pts = [np.asarray(p, float) for p in
+           (survey_pts if survey_pts is not None else survey_ring(6, margin=0.70))]
+    ctr = np.array([0.0, 0.0])
+    inner = [p for p in pts if np.linalg.norm(p - ctr) < 1500]
+    outer = [p for p in pts if np.linalg.norm(p - ctr) >= 1500]
+    # 半径大的环放最后走会更绕，故先走外环、再进内环，最后在内环附近清源
+    if np.linalg.norm(sim.pos) < 1500 and inner:
+        seq = angular_order(inner, sim.pos) + angular_order(outer, ctr)
+    else:
+        seq = angular_order(outer, sim.pos) + angular_order(inner, ctr)
+    for p in seq:
+        self.sweep(p)
+        if verbose:
+            print(f"   侦察 ({p[0]:.0f},{p[1]:.0f}) t={sim.virtual_time:.0f}s")
+    # 清除：最近邻 + 2-opt
+    while True:
+        todo = [c for c in self.est if c not in self.empty]
+        if not todo:
+            break
+        order = route_nn(sim.pos, [self.est[c][0] for c in todo])
+        prog = False
+        for i in order:
+            c = todo[i]
+            if c in self.empty:
+                continue
+            if self.approach_and_clear(c):
+                prog = True
+        if not prog:
+            break
+    return sim.stats(0.0)
+
+
+Robot.run_ring2 = run_ring2

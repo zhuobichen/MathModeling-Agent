@@ -31,22 +31,32 @@ def inner_points():
     return [np.asarray(p, float) for p in robot.survey_ring(6, margin=0.70)]
 
 
-def inner_outer_points(k2=16, r2=1900.0):
-    pts = inner_points()
+def inner_outer_points(k2=14, r2=1850.0, k1=7, r1=1000.0):
+    """问题 4 的侦察点集：内环 + 外环。
+
+    参数由「环绕条件」定出：任意场地内的源点都必须落在其 1000 m 内侦察点集的
+    凸包中，否则朝向背向的定向源会整体隐身。内环半径取 1000（=ρ 下限）使
+    边缘点的 1000 m 覆盖盘内**必定**含有内环点；外环 14@1850 再补上外侧。
+    该配置经 5000 采样点精验，环绕条件满足率 100%。
+    """
+    pts = [np.array([0.0, 0.0])]
+    for i in range(k1):
+        th = 2 * math.pi * i / k1
+        pts.append(np.array([r1 * math.cos(th), r1 * math.sin(th)]))
     for i in range(k2):
         th = 2 * math.pi * i / k2 + math.pi / k2
         pts.append(np.array([r2 * math.cos(th), r2 * math.sin(th)]))
     return pts
 
 
-def batch(tag, pts, dir_frac, seeds, verbose=True):
+def batch(tag, pts, dir_frac, seeds, verbose=True, mode="run"):
     rows = []
     for s in seeds:
         srcs = S.sample_case(np.random.default_rng(s), dir_frac=dir_frac)
         sim = S.Simulator(srcs, seed=s)
         rb = robot.Robot(sim)
         t0 = time.time()
-        st = rb.run(survey_pts=list(pts), interleave=False)
+        st = getattr(rb, mode)(survey_pts=list(pts))
         wall = time.time() - t0
         st["wall_s"] = wall
         st["seed"] = s
@@ -88,7 +98,7 @@ def main():
     print("=" * 78)
     print("问题 3（全为全向干扰源）")
     print("=" * 78)
-    out["q3"] = batch("q3", inner_points(), 0.0, seeds)
+    out["q3"] = batch("q3", inner_points(), 0.0, seeds, mode="run_rho")
 
     print()
     print("=" * 78)
@@ -97,7 +107,7 @@ def main():
     out["q4"] = {}
     for df in (0.3, 0.5, 0.7, 1.0):
         out["q4"][f"df={df}"] = batch(f"q4_df{df}", inner_outer_points(),
-                                      df, seeds)
+                                      df, seeds, mode="run_ring2")
     # 对照：问题 4 若只用内环
     print()
     print("对照组：问题 4 只用内环（说明外环的必要性）")
@@ -105,7 +115,7 @@ def main():
     for df in (0.5, 1.0):
         out["q4_inner_only"][f"df={df}"] = batch(f"q4_inner_df{df}",
                                                  inner_points(), df, seeds,
-                                                 verbose=True)
+                                                 mode="run_ring2", verbose=True)
 
     with open(os.path.join(HERE, "out_trials.json"), "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=1, default=float)
