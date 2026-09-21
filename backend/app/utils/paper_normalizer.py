@@ -228,16 +228,32 @@ class PaperNormalizer:
             # 检测图片引用
             if self.IMAGE_PATTERN.search(line):
                 figure_counter += 1
-                
-                # 检查前一行是否有图号
-                if normalized_lines:
-                    prev_line = normalized_lines[-1].strip()
-                    
-                    # 检查前一行是否是图号标注
-                    if not re.match(r"^\*\*?图\s*\d+[：:]", prev_line):
-                        # 前一行不是图号，在图片前添加图号
-                        normalized_lines[-1] = f"**图{figure_counter}: 图片分析**\n\n{line}"
-                        self.result.fixes_applied.append(f"添加图号标注: 图{figure_counter}")
+
+                # 判断是否已有图号标注。
+                # 本项目的图注约定是「图片在前、图注在后」（见 flows.py 与
+                # _renumber_tables_figures），因此必须同时向前后看。
+                #
+                # 原实现有两处错误，会导致给**每一张**已有图注的图片都插入一条
+                # 占位图注"**图N: 图片分析**"：
+                #   1) 取的是 normalized_lines[-1]，而该行正是刚追加的图片行本身，
+                #      对图片行匹配图注正则必然失败；
+                #   2) 只看前一行，而约定中图注在图片之后。
+                caption_re = re.compile(r"^\*{0,2}图\s*\d+[：:]")
+                prev_line = normalized_lines[-2].strip() if len(normalized_lines) >= 2 else ""
+                has_caption = bool(caption_re.match(prev_line))
+                if not has_caption:
+                    for k in range(i + 1, min(i + 4, len(lines))):
+                        nxt = lines[k].strip()
+                        if not nxt:
+                            continue
+                        if nxt.startswith("#") or self.IMAGE_PATTERN.search(nxt):
+                            break
+                        has_caption = bool(caption_re.match(nxt))
+                        break
+
+                if not has_caption:
+                    normalized_lines[-1] = f"**图{figure_counter}: 图片分析**\n\n{line}"
+                    self.result.fixes_applied.append(f"添加图号标注: 图{figure_counter}")
                 
                 # 检查后续内容是否有图注（至少50字）
                 j = i + 1

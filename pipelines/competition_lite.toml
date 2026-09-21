@@ -1,0 +1,87 @@
+# 精简变体：与 competition.toml 阶段完全一致，但去掉需要额外智能调用的质量门。
+#
+# 用途：外部驱动（--driver file）时，每道调用 driver 的门都会多一次"落盘等待作答"。
+# 对模型能力足够、且由人/强 Agent 直接作答的场景，自审门的边际价值低于其往返成本。
+#
+# 这个文件的存在本身就是设计目标的验证（G1）：
+#   **增删质量门只改 TOML，不碰任何 Python 代码。**
+#
+# 保留下来的门都是**不需要智能调用**的确定性检查：
+#   format_gate  —— 格式校验 + 标准化（纯代码）
+#   vl_figures   —— 识图核对（未配置 VISION 时自动跳过）
+#   score_gate   —— 评分阈值 + 触发章节重写（评分本身由 review 阶段产出）
+
+schema = "1.0"
+name = "competition_lite"
+driver = "file"
+
+[defaults]
+checkpoint = true
+max_retries = 3
+
+[[stage]]
+id = "pdf"
+component = "parse_pdf"
+optional = true
+checkpoint = false
+
+[[stage]]
+id = "parse"
+component = "parse_question"
+needs = ["pdf"]
+
+[[stage]]
+id = "model"
+component = "design_model"
+needs = ["parse"]
+
+[[stage]]
+id = "plan_sections"
+component = "plan_sections"
+needs = ["parse"]
+
+[[stage]]
+id = "analyze"
+component = "run_analysis"
+needs = ["model"]
+input_from = "model"
+fan_out = { over = "plan_sections.analysis_tasks", key = "task_key" }
+
+[[stage]]
+id = "write"
+component = "write_section"
+needs = ["analyze"]
+input_from = "plan_sections"
+fan_out = { over = "plan_sections.sections", key = "section_key" }
+
+[[stage]]
+id = "assemble"
+component = "assemble_paper"
+needs = ["write"]
+input_from = "plan_sections"
+
+[[stage]]
+id = "paper_post"
+component = "paper_postprocess"
+needs = ["assemble"]
+input_from = "assemble"
+after = ["format_gate(normalize=true)"]
+
+[[stage]]
+id = "review"
+component = "review_paper"
+needs = ["paper_post"]
+input_from = "paper_post"
+loop = { max_rounds = 2, gate = "score_gate(threshold=6.0)", repair_with = "section_repair" }
+
+[[stage]]
+id = "polish"
+component = "paper_postprocess"
+needs = ["review"]
+input_from = "paper_post"
+
+[[stage]]
+id = "export"
+component = "export"
+needs = ["polish"]
+input_from = "polish"

@@ -6,6 +6,7 @@ import jupyter_client
 from app.utils.log_util import logger
 import os
 import time
+from app.config.setting import settings
 from app.services.redis_manager import redis_manager
 from app.schemas.response import (
     OutputItem,
@@ -22,10 +23,15 @@ class LocalCodeInterpreter(BaseCodeInterpreter):
         task_id: str,
         work_dir: str,
         notebook_serializer: NotebookSerializer,
+        exec_timeout: int | None = None,
     ):
         super().__init__(task_id, work_dir, notebook_serializer)
         self.km, self.kc = None, None
         self.interrupt_signal = False
+        # 单次代码执行的时间上限。此前的默认值 300 s 对数值优化类任务偏紧
+        # （例如"多子问题参数扫描 + 寻优"动辄需要十几分钟），会中途强制中断内核，
+        # 且中断后已算出的中间结果不会被保存，表现为整段分析静默失败。
+        self.exec_timeout = int(exec_timeout or getattr(settings, "CODE_EXEC_TIMEOUT", 1800))
 
     async def initialize(self):
         logger.info("初始化本地内核")
@@ -200,18 +206,20 @@ class LocalCodeInterpreter(BaseCodeInterpreter):
             error_message,
         )
 
-    def execute_code_(self, code, total_timeout: int = 300) -> list[tuple[str, str]]:
+    def execute_code_(self, code, total_timeout: int | None = None) -> list[tuple[str, str]]:
         """执行代码并收集输出。
 
         Args:
             code: 要执行的 Python 代码。
-            total_timeout: 总超时秒数（默认 300 秒），超时后强制中断内核。
+            total_timeout: 总超时秒数。None 时取实例的 exec_timeout
+                （默认来自 settings.CODE_EXEC_TIMEOUT）。超时后强制中断内核。
 
         Returns:
             (mark, content) 元组列表。
         """
         assert self.kc is not None
         assert self.km is not None
+        total_timeout = int(total_timeout or self.exec_timeout)
         self.kc.execute(code)
         logger.info(f"执行代码: {code}")
         start_time = time.time()

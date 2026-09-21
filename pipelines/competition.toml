@@ -1,0 +1,110 @@
+# 数学建模竞赛 · 数据分析题流水线
+#
+# 这是**唯一**定义阶段顺序的地方。增删改阶段、开关质量门、调整重试策略
+# 都改本文件，不需要动 Python。
+#
+# 语义（与《架构范式转换设计文档》3.5 一致）：
+#   needs       顺序约束（拓扑排序用），不是数据依赖
+#   input_from  显式指定输入产物来自哪个 stage；缺省取第一个 need
+#   optional    失败/跳过时记入 failures 并继续，不阻塞下游
+#   fan_out     按集合展开为多个实例；checkpoint 粒度跟随展开
+#   after       挂在该阶段之后的门
+#   loop        声明式重试环：gate 不过 → repair_with → 重新 gate
+#   inject      从上游产物抽字段注入 ctx.resources["injected"]
+
+schema = "1.0"
+name = "competition"
+driver = "api"          # api | file | echo（可被 CLI 覆盖）
+
+[defaults]
+checkpoint = true
+max_retries = 3
+
+# ── 阶段 0.5：PDF 解析（非 PDF 自动透传）──
+[[stage]]
+id = "pdf"
+component = "parse_pdf"
+optional = true
+checkpoint = false
+
+# ── 阶段 1：题目解析 ──
+[[stage]]
+id = "parse"
+component = "parse_question"
+needs = ["pdf"]
+after = ["self_review(prompt_key='parser_review', max_rounds=2)"]
+human_gate = "problem_split"
+
+# ── 阶段 2：建模方案 ──
+[[stage]]
+id = "model"
+component = "design_model"
+needs = ["parse"]
+after = ["self_review(prompt_key='modeler_review')",
+         "evaluator(threshold=0.6, max_rounds=2)"]
+human_gate = "model_selection"
+
+# ── 阶段 2.5：章节与分析任务规划（取代 flows.get_seq 的硬编码）──
+[[stage]]
+id = "plan_sections"
+component = "plan_sections"
+needs = ["parse"]
+
+# ── 阶段 3：代码实现（按分析任务展开）──
+[[stage]]
+id = "analyze"
+component = "run_analysis"
+needs = ["model"]
+input_from = "model"
+fan_out = { over = "plan_sections.analysis_tasks", key = "task_key" }
+inject = ["model.method_contract"]
+
+# ── 阶段 4：论文写作（按章节展开）──
+[[stage]]
+id = "write"
+component = "write_section"
+needs = ["analyze"]
+input_from = "plan_sections"
+fan_out = { over = "plan_sections.sections", key = "section_key" }
+inject = ["parse.context_anchor"]
+
+# ── 阶段 5：装配 + 后处理 ──
+[[stage]]
+id = "assemble"
+component = "assemble_paper"
+needs = ["write"]
+input_from = "plan_sections"
+
+[[stage]]
+id = "paper_post"
+component = "paper_postprocess"
+needs = ["assemble"]
+input_from = "assemble"
+after = ["format_gate(normalize=true)"]
+
+# ── 阶段 6：评审 + 反馈重写环 ──
+# 注意：TOML 1.0 的 inline table 不能跨行，必须写在一行内。
+[[stage]]
+id = "review"
+component = "review_paper"
+needs = ["paper_post"]
+input_from = "paper_post"
+after = ["vl_figures(tolerance=0.5)"]
+loop = { max_rounds = 2, gate = "score_gate(threshold=6.0)", repair_with = "section_repair" }
+
+# ── 阶段 7：修复后重新后处理（重编号/去重需在重写之后再跑一次）──
+# 注意 input_from 指向 paper_post 而非 review：
+#   needs 只是顺序约束（等 review 的重写环结束），数据仍取论文产物本身。
+#   review_paper 的产物 kind 是 review_result，不带正文，不能作为后处理的输入。
+[[stage]]
+id = "polish"
+component = "paper_postprocess"
+needs = ["review"]
+input_from = "paper_post"
+
+# ── 阶段 8：导出 ──
+[[stage]]
+id = "export"
+component = "export"
+needs = ["polish"]
+input_from = "polish"

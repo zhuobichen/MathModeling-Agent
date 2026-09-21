@@ -2,6 +2,7 @@
 
 from app.config.setting import settings
 from app.core.llm.llm import LLM
+from app.utils.log_util import logger
 
 
 class LLMFactory:
@@ -103,3 +104,48 @@ class LLMFactory:
                 task_id=self.task_id,
             )
         return None
+
+    # ── 按角色取模型（组件化后的统一入口）──
+
+    _ROLE_SETTINGS = {
+        "parser": ("PARSER_API_KEY", "PARSER_MODEL", "PARSER_BASE_URL",
+                   "PARSER_MAX_TOKENS"),
+        "modeler": ("MODELER_API_KEY", "MODELER_MODEL", "MODELER_BASE_URL",
+                    "MODELER_MAX_TOKENS"),
+        "coder": ("CODER_API_KEY", "CODER_MODEL", "CODER_BASE_URL",
+                  "CODER_MAX_TOKENS"),
+        "writer": ("WRITER_API_KEY", "WRITER_MODEL", "WRITER_BASE_URL",
+                   "WRITER_MAX_TOKENS"),
+        "reviewer": ("REVIEWER_API_KEY", "REVIEWER_MODEL", "REVIEWER_BASE_URL",
+                     "REVIEWER_MAX_TOKENS"),
+    }
+
+    def get_llm_by_role(self, role: str | None) -> LLM | None:
+        """按 `Component.model_role` 取对应的 LLM。
+
+        与 `get_all_llms()` 的区别：**未配置 API Key 时返回 None**，
+        使上层能给出"该角色的模型未配置"这种可诊断的错误，
+        而不是发出一个必然失败的请求。
+
+        role 为 None 时退回到 writer（最通用的角色），全无配置则返回 None。
+        """
+        role = role or "writer"
+        cfg = self._ROLE_SETTINGS.get(role)
+        if cfg is None:
+            logger.warning(f"未知的 model_role: {role!r}，回退到 writer")
+            cfg = self._ROLE_SETTINGS["writer"]
+        key_name, model_name, url_name, tokens_name = cfg
+        api_key = getattr(settings, key_name, None)
+        model = getattr(settings, model_name, None)
+        if not api_key or not model:
+            logger.warning(
+                f"model_role={role!r} 未配置（{key_name} / {model_name} 缺失）"
+            )
+            return None
+        return LLM(
+            api_key=api_key,
+            model=model,
+            base_url=getattr(settings, url_name, None),
+            task_id=self.task_id,
+            max_tokens=getattr(settings, tokens_name, None),
+        )

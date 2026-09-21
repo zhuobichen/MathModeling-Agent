@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     MAX_MODELER_RETRIES: int = 3
     E2B_API_KEY: Optional[str] = None
     CODE_INTERPRETER: str = "local"  # local | docker | e2b
+    CODE_EXEC_TIMEOUT: int = 1800  # 单次代码执行上限（秒）。
+    # 原默认 300 s 对数值优化/参数扫描类子任务偏紧，超时会强制中断内核且
+    # 中间结果不落盘，表现为整段分析静默失败。可通过环境变量覆盖。
     DOCKER_MEM_LIMIT: str = "2g"
     DOCKER_CPU_LIMIT: float = 1.0
     LOG_LEVEL: str = "DEBUG"

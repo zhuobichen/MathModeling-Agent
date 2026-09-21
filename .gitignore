@@ -20,7 +20,9 @@ venv/
 .idea/
 
 # Project
-project/work_dir/
+# 注意：含中间斜杠的模式会被锚定到仓库根，故必须写成 **/ 前缀，
+# 否则 backend/project/work_dir/ 不会被忽略。
+**/project/work_dir/
 *.ipynb
 data/chromadb/
 
@@ -30,3 +32,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# 运行日志（含 messages/*.json）
+backend/logs/

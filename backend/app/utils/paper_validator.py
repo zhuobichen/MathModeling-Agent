@@ -183,8 +183,10 @@ class PaperValidator:
             # 检查二级标题
             match2 = self.HEADING_2_PATTERN.match(line)
             if match2:
-                heading_stack.append(match2.group(1))
-                if prev_level > 1:
+                # 判据：此前是否出现过一级标题（heading_stack 为空即从未出现）。
+                # 不能用"上一个标题的层级"来判断——同一章下连续多个二级标题是
+                # 正常结构（如 1.1、1.2、1.3），用 prev_level > 1 会把它全部误报。
+                if not heading_stack:
                     self.result.add_error(
                         "标题层级",
                         "invalid_heading",
@@ -192,6 +194,7 @@ class PaperValidator:
                         i + 1,
                         "确保存在上级标题"
                     )
+                heading_stack.append(match2.group(1))
                 prev_level = 2
                 continue
             
