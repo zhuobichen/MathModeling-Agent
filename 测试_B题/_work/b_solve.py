@@ -527,20 +527,16 @@ def run_p4():
                  - (ideal[t[1]][1]-ideal[t[0]][1])*(ideal[t[2]][0]-ideal[t[0]][0]))/2
         print(f"     发射 U{list(t)}  面积 {ar:.1f} m²")
 
-    print("\n④ 发射源轮换 vs 固定基准组的对比仿真（阻尼步长 λ=0.5）")
+    print("\n④ 三种发射源策略的对比仿真")
     print("   锥形编队**没有 FY00 那样的固定锚点**，纯方位观测下整体平移与")
     print("   旋转不可观测，故用「扣除最优刚体运动后的形状残差」衡量队形质量。")
-    print("   两个对照：发射源逐轮轮换 vs 固定一组作基准。")
-    pos0 = {i: ideal[i] + rng.normal(0, 8, 2) for i in range(10)}
-    e0_rigid = shape_residual(pos0, ideal)
-    print(f"   初始形状残差 {e0_rigid:.3f} m（相邻间距标准差 "
-          f"{np.std([np.linalg.norm(pos0[a]-pos0[b]) for a,b in [(0,1),(0,2),(4,5),(3,4),(4,6),(1,3),(2,5)]]) if True else 0:.3f} m）")
 
-    def simulate(rotate_tx: bool, rounds=20):
-        pos = dict(pos0)
+    def simulate(groups, rounds=40, step=0.5, seed=0, pert=8.0):
+        rr = np.random.default_rng(seed)
+        pos = {i: ideal[i] + rr.normal(0, pert, 2) for i in range(10)}
         h = []
-        for rnd in range(1, rounds + 1):
-            tx = list(plan[(rnd - 1) % 3]) if rotate_tx else list(plan[0])
+        for rnd in range(rounds):
+            tx = list(groups[rnd % len(groups)])
             mv = [i for i in range(10) if i not in tx]
             srcs = [pos[i] for i in tx]
             new = dict(pos)
@@ -550,26 +546,61 @@ def run_p4():
                     q = solve_lsq(meas, tx, pos[j], ideal)
                 except Exception:
                     continue
-                new[j] = np.asarray(pos[j]) + 0.5 * (ideal[j] - q)
+                new[j] = np.asarray(pos[j]) + step * (ideal[j] - q)
             pos = new
-            h.append((shape_residual(pos, ideal), max(
-                float(np.linalg.norm(pos[i] - ideal[i])) for i in range(10))))
+            h.append(shape_residual(pos, ideal))
         return pos, h
 
-    for rot in (True, False):
-        pos, h = simulate(rot)
-        name = "发射源逐轮轮换" if rot else "固定基准组"
-        print(f"   {name}: 第1轮 {h[0][0]:.3f} → 第5轮 {h[4][0]:.3f} → "
-              f"第20轮 {h[-1][0]:.3f} m（形状残差）"
-              + ("   ← 发散" if h[-1][0] > h[0][0] else "   ← 收敛"))
-    pos, h = simulate(False)
-    hist = [x[1] for x in h]
-    hist_rigid = [x[0] for x in h]
-    edges = [(0,1),(0,2),(4,5),(3,4),(4,6),(1,3),(2,5)]
-    sd0 = np.std([np.linalg.norm(pos0[a] - pos0[b]) for a, b in edges])
-    sd1 = np.std([np.linalg.norm(pos[a] - pos[b]) for a, b in edges])
-    print(f"   固定基准组、相邻间距标准差: 初始 {sd0:.3f} m → 调整后 {sd1:.3f} m"
-          f"（相对初始 {sd1/sd0*100:.1f}%）")
+    # 注意：rng 必须在推导式**之外**创建。写成
+    # `{i: ideal[i] + np.random.default_rng(0).normal(...) for i in ...}`
+    # 会每次新建同一粒子的生成器、取出同一个向量，10 架得到完全相同的位移，
+    # 那是纯平移，形状残差恒为 0，整个仿真就失去意义了。
+    _r0 = np.random.default_rng(0)
+    pos0 = {i: ideal[i] + _r0.normal(0, 8, 2) for i in range(10)}
+    e0 = shape_residual(pos0, ideal)
+    print(f"   初始形状残差 {e0:.3f} m（初始扰动 N(0,8²)，40 轮，λ=0.5）")
+    print(f"   {'策略':<34}{'第40轮(m)':>12}")
+    strategies = [
+        ("发射源逐轮三组轮换", [list(plan[i]) for i in range(3)]),
+        ("固定单组基准", [list(plan[0])]),
+        ("两组交替自举 [0,6,9]↔[1,5,8]", [[0, 6, 9], [1, 5, 8]]),
+    ]
+    best_h = None
+    for name, groups in strategies:
+        _, h = simulate(groups)
+        print(f"   {name:<34}{h[-1]:>12.3f}")
+        if best_h is None or h[-1] < best_h[-1]:
+            best_h = h
+            best_name = name
+            best_groups = groups
+
+    print(f"\n⑤ 最优策略「{best_name}」的鲁棒性")
+    _, hb = simulate(best_groups, rounds=60)
+    print(f"   收敛曲线: 第5轮 {hb[4]:.2f} → 第10轮 {hb[9]:.2f} → "
+          f"第20轮 {hb[19]:.2f} → 第40轮 {hb[39]:.2f} → 第60轮 {hb[-1]:.3f} m")
+    fin = [simulate(best_groups, rounds=40, seed=s)[1][-1] for s in range(20)]
+    print(f"   20 个随机种子（40 轮）: 中位 {np.median(fin):.3f} m, "
+          f"均值 {np.mean(fin):.3f}, 最大 {max(fin):.3f}, 最小 {min(fin):.3f}")
+    print("   → 中位数已达亚米级，但分布有长尾（个别初始构型收敛较慢）")
+    print(f"   {'阻尼步长':>10}{'40轮后(m)':>14}")
+    for st in (0.3, 0.4, 0.5, 0.6, 0.7):
+        v = [simulate(best_groups, rounds=40, step=st, seed=s)[1][-1] for s in range(5)]
+        print(f"   {st:>10.1f}{np.median(v):>14.3f}"
+              + ("   ← 发散" if np.median(v) > 20 else ""))
+
+    # 用与 pos0 同一初始构型（同一随机种子）跑一次，才能对比间距标准差
+    _, _ = simulate(best_groups, rounds=1)
+    _r1 = np.random.default_rng(0)
+    pos_a = {i: ideal[i] + _r1.normal(0, 8, 2) for i in range(10)}
+    pos_b, _ = simulate(best_groups, rounds=40)
+    # 只取**真正相邻**（理想间距 50 m）的点对。混入非相邻对（如 U04-U06
+    # 理想距离 86.6 m）会让间距标准差恒为十几米，与形状残差自相矛盾。
+    edges = [(a, b) for a in range(10) for b in range(a + 1, 10)
+             if abs(np.linalg.norm(ideal[a] - ideal[b]) - 50.0) < 1e-6]
+    sd0 = np.std([np.linalg.norm(pos_a[a] - pos_a[b]) for a, b in edges])
+    sd1 = np.std([np.linalg.norm(pos_b[a] - pos_b[b]) for a, b in edges])
+    print(f"   相邻间距标准差（理想值 0，间距均为 50 m）: "
+          f"初始 {sd0:.3f} m → 调整后 {sd1:.3f} m（降至 {sd1/sd0*100:.1f}%）")
     fig, ax = plt.subplots(1, 2, figsize=(11, 4.4))
     ax[0].plot(range(1, 21), hist, "b-o", ms=4)
     ax[0].set_xlabel("调整轮次"); ax[0].set_ylabel("队形最大残差 (m)")
