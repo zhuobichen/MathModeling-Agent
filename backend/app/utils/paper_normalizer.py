@@ -73,6 +73,28 @@ def _caption_from_html(table_html: str, max_parts: int = 4, max_len: int = 40) -
     return cap or "数据表"
 
 
+def _caption_from_following(lines, i, image_pattern, max_len: int = 48) -> str:
+    """用图片后紧跟的分析文字首句作图注。
+
+    原实现写死 "图片分析"，与表题注原先写死的 "数据表格" 是同一类缺陷：
+    看着像题注、却不传递任何信息。图片后面的首句通常正是该图的说明，
+    直接采用它比占位词有用。确实取不到时给一个显式的待补标记，
+    而不是一句读起来像真题注的话。
+    """
+    for k in range(i + 1, min(i + 6, len(lines))):
+        t = lines[k].strip()
+        if not t or t.startswith("#") or image_pattern.search(t):
+            continue
+        t = re.sub(r"[*`$]", "", t)
+        # 跳过「结果分析。」这类过短的引导标签，它不构成题注
+        sents = [x.strip() for x in re.split(r"[。；;]", t) if x.strip()]
+        cap = next((x for x in sents if len(x) >= 8), sents[0] if sents else t)
+        if len(cap) > max_len:
+            cap = cap[:max_len] + "…"
+        return cap or "（图注待补）"
+    return "（图注待补）"
+
+
 class PaperNormalizer:
     """论文格式标准化器。"""
     
@@ -298,8 +320,11 @@ class PaperNormalizer:
                         break
 
                 if not has_caption:
-                    normalized_lines[-1] = f"**图{figure_counter}: 图片分析**\n\n{line}"
-                    self.result.fixes_applied.append(f"添加图号标注: 图{figure_counter}")
+                    cap = _caption_from_following(lines, i, self.IMAGE_PATTERN)
+                    normalized_lines[-1] = (
+                        f"**图{figure_counter}: {cap}**\n\n{line}")
+                    self.result.fixes_applied.append(
+                        f"添加图号标注: 图{figure_counter}")
                 
                 # 检查后续内容是否有图注（至少50字）
                 j = i + 1
