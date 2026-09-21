@@ -27,6 +27,52 @@ class NormalizationResult:
         return self.original_content != self.normalized_content
 
 
+_NUMERIC_CELL = re.compile(r"[\s\d.,%\-–—/()（）·:：]+")
+
+
+def _caption_from_html(table_html: str, max_parts: int = 4, max_len: int = 40) -> str:
+    """从表头行推导一个描述性题注。
+
+    原实现给所有无题注的表格写死 "数据表格"，实测 24 张表全部叫这个名字：
+    等于没有题注，又容易被误当成真实题注读过去。表头通常已经说明了表格
+    内容，直接采用它比占位词有用得多。
+
+    有些表格把数值也写成 `<th>`（如「轮次 | 5 | 10 | 20 | 40」），故先剔除
+    纯数值格；若剔除后只剩一个词，则补上数值跨度（如「轮次 5～40」），
+    否则「表15: 轮次」这种题注信息量太低。
+    """
+    m = re.search(r"<tr[^>]*>(.*?)</tr>", table_html, re.S | re.I)
+    if not m:
+        return "数据表"
+    cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", m.group(1), re.S | re.I)
+    parts = []
+    for c in cells:
+        t = re.sub(r"<[^>]+>", "", c)
+        t = re.sub(r"\s+", " ", t).strip()
+        if t:
+            parts.append(t)
+    if not parts:
+        return "数据表"
+
+    plain = [p for p in parts if not _NUMERIC_CELL.fullmatch(p)]
+    nums = [p for p in parts if _NUMERIC_CELL.fullmatch(p)]
+
+    # 「双列对」表头（如「编号|理想坐标|编号|理想坐标」）会重复，
+    # 去重后才是这张表真正在讲什么。
+    plain = list(dict.fromkeys(plain))
+
+    if len(plain) == 1 and len(nums) >= 2:
+        cap = f"{plain[0]} {nums[0]}～{nums[-1]}"
+    else:
+        use = plain or parts
+        cap = "、".join(use[:max_parts])
+        if len(use) > max_parts:
+            cap += " 等"
+    if len(cap) > max_len:
+        cap = cap[:max_len] + "…"
+    return cap or "数据表"
+
+
 class PaperNormalizer:
     """论文格式标准化器。"""
     
@@ -308,7 +354,7 @@ class PaperNormalizer:
                 continue
 
             added += 1
-            label = f"**表{max_existing + added}: 数据表格**"
+            label = f"**表{max_existing + added}: {_caption_from_html(table_html)}**"
             result_parts.append(content[last_end:start])
             result_parts.append(f"\n\n{label}\n\n{table_html}")
             last_end = end

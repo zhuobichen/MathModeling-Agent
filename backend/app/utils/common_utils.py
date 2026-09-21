@@ -157,6 +157,38 @@ def transform_link(task_id: str, content: str):
     return content
 
 
+def _curly_quotes(text: str) -> str:
+    """把成对的直引号转成中文弯引号。
+
+    为什么要自己做：pypandoc 的 `markdown` 格式**默认带 `smart` 扩展**，
+    它会按拉丁文规则判断引号方向。实测「记作"约 0.5%"并据此」被转成
+    `记作” 约 0.5% “并据此`——前后两个都判反了，因为开引号的**后一个**
+    字符是汉字而不是空格/字母。
+
+    这里先关掉 pandoc 的 smart，再按「同一行内成对出现、奇数个开偶数个闭」
+    重新配对。行内引号数为奇数时不转换——宁可保留直角引号，也不猜方向。
+    HTML 行（属性里的引号）与围栏代码块一并跳过。
+    """
+    out = []
+    for line in text.split("\n"):
+        s = line.lstrip()
+        if s.startswith("<") or s.startswith("```") or '"' not in line:
+            out.append(line)
+            continue
+        if line.count('"') % 2:
+            out.append(line)
+            continue
+        buf, opening = [], True
+        for ch in line:
+            if ch == '"':
+                buf.append("“" if opening else "”")
+                opening = not opening
+            else:
+                buf.append(ch)
+        out.append("".join(buf))
+    return "\n".join(out)
+
+
 def md_2_docx(task_id: str):
     """将 Markdown 论文转换为专业排版 DOCX。
 
@@ -195,11 +227,18 @@ def md_2_docx(task_id: str):
         tables_data = _extract_tables_from_json(work_dir)
 
     # Step 2: Pandoc 转换（公式→MathML，图片嵌入，正文排版）
-    pypandoc.convert_file(
-        source_file=md_path,
+    #
+    # `-smart`：关掉 pandoc 的智能引号。它按拉丁规则判方向，遇中文会把
+    # 成对引号判反（见 `_curly_quotes` 注释）。方向改由 `_curly_quotes`
+    # 自己定。引号修正只作用于**传给 pandoc 的那份字符串**，
+    # res.md 本身不改——它还要被 Step 3 与最终交付复用。
+    with open(md_path, "r", encoding="utf-8") as f:
+        md_text = f.read()
+    pypandoc.convert_text(
+        _curly_quotes(md_text),
         to="docx",
         outputfile=docx_path,
-        format="markdown+tex_math_dollars",
+        format="markdown+tex_math_dollars-smart",
         extra_args=extra_args,
     )
     logger.info(f"DOCX 转换完成: {docx_path}")
