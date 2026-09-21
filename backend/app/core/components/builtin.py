@@ -241,14 +241,18 @@ async def _plan_sections(art: Artifact, ctx: StageContext) -> Artifact:
         "kind": "analysis", "heading_level": "h1", "heading_scope": "self",
         "depends_on": "sensitivity_analysis",
     }
+    sections["validation"] = {
+        "key": "validation", "order": order + 1, "title": "结果验证与对照",
+        "kind": "structural", "heading_level": "h1", "heading_scope": "self",
+    }
     sections["judge"] = {
-        "key": "judge", "order": order + 1, "title": "模型评价与改进",
+        "key": "judge", "order": order + 2, "title": "模型评价与改进",
         "kind": "structural", "heading_level": "h1", "heading_scope": "self",
     }
     # 参考文献：论文格式规范要求的必需章节。
     # 新增一个章节只需在此处加一段——这正是把章节定义收进注册表的目的（G3）。
     sections["references"] = {
-        "key": "references", "order": order + 2, "title": "参考文献",
+        "key": "references", "order": order + 3, "title": "参考文献",
         "kind": "structural", "heading_level": "h1", "heading_scope": "self",
     }
 
