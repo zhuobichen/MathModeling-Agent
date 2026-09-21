@@ -1,0 +1,5 @@
+字段 | 类型 | 取值说明
+accepted | boolean | true。
+real_timestamp_ms | number | 现实世界时间戳，单位为毫秒。
+virtual_time_s | number | 退出时的虚拟时刻；/exit 不推进虚拟时钟。
+exit_reason | string | 退出原因。

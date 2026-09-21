@@ -1,0 +1,8 @@
+字段 | 类型 | 必填 | 取值说明
+arena_id | string | 是 | 必须是 "default"。
+robot_id | string | 是 | 机器狗标识，非空字符串，参赛队号。
+request_id | string | 是 | 请求标识，非空字符串。
+position | object | 是 | 检测位置。
+position.x | number | 是 | X 坐标，有限JSON number，单位米，绝对值不得超过2000000。
+position.y | number | 是 | Y 坐标，有限JSON number，单位米，绝对值不得超过2000000。
+channel | number | 是 | 检测频道，整数范围 。

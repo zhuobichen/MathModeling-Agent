@@ -1,0 +1,4 @@
+字段 | 类型 | 必填 | 取值说明
+arena_id | string | 是 | 必须是 "default"。
+robot_id | string | 是 | 机器狗标识，非空字符串，参赛队号。
+request_id | string | 是 | 请求标识，非空字符串。

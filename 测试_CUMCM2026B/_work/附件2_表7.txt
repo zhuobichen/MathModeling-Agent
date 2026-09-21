@@ -1,0 +1,6 @@
+字段 | 类型 | 取值说明
+accepted | boolean | true。
+real_timestamp_ms | number | 现实世界时间戳，单位为毫秒。
+virtual_time_s | number | 本次检测完成后的虚拟时刻。
+measure_result | string | 检测结果，取值为 "no_signal"、"near" 或 "direction"。
+svd_deg | number | 示向度，单位为度，保留两位小数。只有 measure_result="direction" 时返回。

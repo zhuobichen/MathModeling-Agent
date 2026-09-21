@@ -1,0 +1,5 @@
+字段 | 类型 | 取值说明
+accepted | boolean | true。
+real_timestamp_ms | number | 现实世界时间戳，单位为毫秒。
+virtual_time_s | number | 本次清除完成后的虚拟时刻。
+clear_result | string | 清除结果码。只有 "success" 和 "no_target_in_range"。

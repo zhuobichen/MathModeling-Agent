@@ -1,0 +1,4 @@
+字段 | 类型 | 含义
+accepted | boolean | 模拟器是否接受本次请求。
+real_timestamp_ms | number | 模拟器响应时的现实世界时间戳，单位为毫秒。
+virtual_time_s | number | 虚拟时钟，单位为秒。

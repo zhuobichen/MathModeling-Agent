@@ -1,0 +1,7 @@
+字段 | 类型 | 取值说明
+accepted | boolean | true。
+real_timestamp_ms | number | 现实世界时间戳，单位为毫秒。
+virtual_time_s | number | 进入后的虚拟时刻；/enter 不推进虚拟时钟。
+max_virtual_duration_s | number | 模拟器配置的虚拟世界限时，默认 360000。
+max_real_duration_s | number | 模拟器配置的现实世界限时，默认 1200。
+remaining_real_duration_s | number | 本次测试从 /enter 成功起实际还能使用的完整现实时间秒数，整数范围 。
