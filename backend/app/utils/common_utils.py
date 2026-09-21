@@ -408,6 +408,90 @@ def _parse_html_tables(text: str) -> tuple[str, list[dict]]:
 # 方案一：HTML 表格直接用 python-docx 建 Word 表（单路径，无 fallback）
 # ============================================================
 
+def _parse_html_table(html: str) -> dict | None:
+    """把一个 HTML 表格解析为 {headers, rows}，正确展开 rowspan / colspan。
+
+    原实现直接 `[td.get_text() for td in tr.find_all(...)]`，有两个后果：
+      1. 忽略 colspan —— 跨列单元格只算一列，表头与数据列数对不上；
+      2. 只把**第一个**含 th 的行当表头 —— 双行表头的第二行被当成数据行，
+         于是表头整体下移一行，与数据错位。
+    论文里带合并表头的表（如"时间 | 情形(1)[浮子位移|浮子速度|…]"）会因此散掉。
+
+    此处的做法：先按 rowspan/colspan 把表格摊平成规则网格，再把**连续的、
+    整行皆为 th 的若干行**合并为一行表头（同列文字去重后拼接）。
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "lxml")
+    table = soup.find("table")
+    if table is None:
+        return None
+
+    grid: list[list[tuple[str, bool]]] = []
+    occupied: dict[tuple[int, int], tuple[str, bool]] = {}
+
+    for r, tr in enumerate(table.find_all("tr")):
+        cells = tr.find_all(["th", "td"])
+        if not cells:
+            continue
+        row: list[tuple[str, bool]] = []
+        c = 0
+        for cell in cells:
+            while (r, c) in occupied:          # 先补上被上方 rowspan 占掉的列
+                row.append(occupied.pop((r, c)))
+                c += 1
+            is_th = cell.name == "th"
+            txt = cell.get_text(strip=True)
+            try:
+                cs = max(1, int(cell.get("colspan", 1) or 1))
+            except (TypeError, ValueError):
+                cs = 1
+            try:
+                rs = max(1, int(cell.get("rowspan", 1) or 1))
+            except (TypeError, ValueError):
+                rs = 1
+            for _ in range(cs):
+                row.append((txt, is_th))
+                for rr in range(1, rs):
+                    occupied[(r + rr, c)] = (txt, is_th)
+                c += 1
+        while (r, c) in occupied:              # 行尾补齐
+            row.append(occupied.pop((r, c)))
+            c += 1
+        if row:
+            grid.append(row)
+
+    if not grid:
+        return None
+
+    ncol = max(len(r) for r in grid)
+    grid = [r + [("", False)] * (ncol - len(r)) for r in grid]
+
+    # 表头 = 开头连续的、每格都是 th 的行
+    n_head = 0
+    for row in grid:
+        if all(is_th for _, is_th in row):
+            n_head += 1
+        else:
+            break
+    if n_head == 0:
+        n_head = 1                            # 无 th 时退化为首行做表头
+
+    headers = []
+    for c in range(ncol):
+        parts: list[str] = []
+        for r in range(n_head):
+            t = grid[r][c][0]
+            if t and (not parts or parts[-1] != t):
+                parts.append(t)
+        headers.append(" ".join(parts))
+
+    rows = [[cell for cell, _ in grid[r]] for r in range(n_head, len(grid))]
+    if not rows:
+        return None
+    return {"headers": headers, "rows": rows}
+
+
 def _extract_html_tables(md_path: str) -> list[dict]:
     """从 res.md 提取 HTML 表格，替换为占位符。
 
@@ -429,31 +513,13 @@ def _extract_html_tables(md_path: str) -> list[dict]:
         caption = f"表{cap_match.group(1)}: {cap_match.group(2).strip()}" if cap_match else ""
 
         try:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, "lxml")
-            table = soup.find("table")
-            if not table:
+            parsed = _parse_html_table(html)
+            if parsed is None:
                 return "[TABLE_PLACEHOLDER]"
-
-            headers = []
-            rows = []
-            for tr in table.find_all("tr"):
-                cells = [td.get_text(strip=True) for td in tr.find_all(["th", "td"])]
-                if not cells:
-                    continue
-                if not headers and tr.find("th"):
-                    headers = cells
-                else:
-                    rows.append(cells)
-
-            if not headers and rows:
-                headers = rows[0]
-                rows = rows[1:]
-
             tables_data.append({
                 "caption": caption,
-                "headers": headers,
-                "rows": rows,
+                "headers": parsed["headers"],
+                "rows": parsed["rows"],
             })
             return f"\n[TABLE_{len(tables_data) - 1}]\n"
         except Exception:

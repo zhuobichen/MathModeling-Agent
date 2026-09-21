@@ -292,6 +292,7 @@ class PaperNormalizer:
 
         result_parts = []
         last_end = 0
+        added = 0
         for idx, match in enumerate(tables):
             table_html = match.group(1)
             start, end = match.start(), match.end()
@@ -299,11 +300,15 @@ class PaperNormalizer:
             # 表格前 300 字符内查找已有表号
             before = content[max(0, start - 300):start]
             cap_match = re.search(r"\*\*?表\s*(\d+)[：:]\s*([^*]*)\*\*?", before)
-            if cap_match:
-                label = f"**表{cap_match.group(1)}: {cap_match.group(2).strip()}**"
-            else:
-                label = f"**表{max_existing + idx + 1}: 数据表格**"
 
+            if cap_match:
+                # 已有题注：它本来就在 content[last_end:start] 这一段里，
+                # 直接保留即可。原实现在这里也走"重新插入 label"的分支，
+                # 于是每张已有题注的表都会多出一条重复题注（实测 21 张表 42 条）。
+                continue
+
+            added += 1
+            label = f"**表{max_existing + added}: 数据表格**"
             result_parts.append(content[last_end:start])
             result_parts.append(f"\n\n{label}\n\n{table_html}")
             last_end = end
