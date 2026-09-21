@@ -600,12 +600,20 @@ def _write_res_md(content: str, work_dir: str) -> None:
 
 
 async def _export(art: Artifact, ctx: StageContext) -> Artifact:
-    """导出 DOCX / PDF。"""
+    """导出 DOCX / PDF。
+
+    **注意**：`md_2_docx` 内部的 `_extract_html_tables` 会把 res.md 中的 HTML 表格
+    替换成 `[TABLE_n]` 占位符并**写回原文件**（供 pandoc 转换用，表格数据另行恢复）。
+    这对 DOCX 是正确的，但会**永久破坏 res.md 这个交付物**——转换完成后表格全没了。
+
+    因此在转换之后必须用 artifact 里的完整内容重写一次 res.md。
+    """
     from app.utils.common_utils import md_2_docx, md_2_pdf
 
     fmt = (ctx.resources.get("format_output") or "markdown")
     content = art.payload.get("content") or ""
     _write_res_md(content, ctx.work_dir)
+
     out = None
     try:
         if fmt == "latex":
@@ -614,7 +622,10 @@ async def _export(art: Artifact, ctx: StageContext) -> Artifact:
             out = md_2_docx(ctx.task_id)
     except Exception as e:
         logger.warning(f"导出失败: {e}")
-    logger.info(f"导出完成: {out}")
+
+    # 还原 res.md（见上）。md_2_docx / md_2_pdf 都可能清洗过它。
+    _write_res_md(content, ctx.work_dir)
+    logger.info(f"导出完成: {out or '（函数无返回值，产物见工作目录）'}")
     return Artifact(kind="exported", stage_id=ctx.stage_id,
                     payload={"content": content, "output": str(out) if out else ""})
 

@@ -205,8 +205,15 @@ def md_2_docx(task_id: str):
     logger.info(f"DOCX 转换完成: {docx_path}")
 
     # Step 3: 格式化 + 插入 Word 真表格
-    if reference_doc.exists():
-        _sync_template_styles(str(reference_doc), docx_path, tables_data)
+    #
+    # 原先此处以 `if reference_doc.exists()` 为门控，但：
+    #   (a) `_sync_template_styles` 的函数体**从不使用** template_path
+    #       （签名与 docstring 注明"保留，供未来使用"）；
+    #   (b) 模板文件 templates/论文模板.docx 在本仓库中从未存在过（git 历史中也没有）。
+    # 两者叠加的结果是：这一步从未执行，**DOCX 里的表格永远停留在
+    # `[TABLE_n]` 占位符上**，而表格数据已经正确提取在 tables_data 中。
+    # 表格插入与样式注入都不依赖模板，故改为无条件调用。
+    _sync_template_styles(str(reference_doc), docx_path, tables_data)
 
 
 def md_2_pdf(task_id: str, work_dir: str | None = None) -> str | None:
