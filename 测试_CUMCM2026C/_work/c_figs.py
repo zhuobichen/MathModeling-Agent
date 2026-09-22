@@ -94,58 +94,87 @@ def fig2():
     return days
 
 
-def fig3():
-    E, _, _ = D.load_att1()
-    F = D.load_att3(); L, V = D.load_att2()
-    cal = range(0, 31)
-    bias = C.calibrate_bias(F, V, cal)
-    sigma = C.calibrate_sigma(F, V, cal)
-    # (a) 预报误差分布（按发布时刻）
-    fig, ax = plt.subplots(1, 3, figsize=(15, 4.4))
-    for iss, c in ((0, "C0"), (6, "C1"), (12, "C2")):
-        errs = []
-        for d in range(365):
+def _mae_by_alignment(V, F):
+    """把附件 3 的预报与附件 2 实测在几种对时方式下比 MAE，用于判定语义。"""
+    import c_data as DD
+    f = []
+    cand = {"整点 X = issue+k": [], "整点 X = issue+k-1": [],
+            "整点 X = issue+k+1": [], "小时均值 (h,h+1]": [],
+            "半小时点 X = h+0.5": []}
+    for d in range(365):
+        row = V[d]
+        for iss in (0, 6, 12, 18):
             for k in range(1, 25):
                 h = (iss + k - 1) % 24
                 if h * 6 < iss * 6:
                     continue
-                errs.append(V[d][h * 6:(h + 1) * 6].mean() - F[(d, iss)][k - 1])
+                f.append(F[(d, iss)][k - 1])
+                cand["整点 X = issue+k"].append(DD.actual_at(row, iss + k))
+                cand["整点 X = issue+k-1"].append(DD.actual_at(row, iss + k - 1))
+                cand["整点 X = issue+k+1"].append(DD.actual_at(row, iss + k + 1))
+                cand["小时均值 (h,h+1]"].append(float(row[h * 6:h * 6 + 6].mean()))
+                cand["半小时点 X = h+0.5"].append(DD.actual_at(row, h + 0.5))
+    f = np.array(f)
+    return {k: float(np.mean(np.abs(f - np.array(v))))
+            for k, v in cand.items()}
+
+
+def fig3():
+    F = D.load_att3(); L, V = D.load_att2()
+    cal = range(0, 31)
+    bias = C.calibrate_bias(F, V, cal)
+    sigma = C.calibrate_sigma(F, V, cal)
+    fig, ax = plt.subplots(1, 3, figsize=(15, 4.4))
+
+    # (a) 同刻口径的预报误差分布
+    for iss, c in ((0, "C0"), (6, "C1"), (12, "C2"), (18, "C3")):
+        errs = []
+        for d in range(365):
+            for k in range(1, 25):
+                if iss + k > 24:
+                    continue
+                errs.append(D.actual_at(V[d], iss + k) - F[(d, iss)][k - 1])
         e = np.array(errs)
         ax[0].hist(e[e != 0], bins=60, histtype="step", lw=1.4, color=c,
                    label=f"{iss}:00 发布（均值 {e.mean():+.0f}，σ={e.std():.0f}）")
     ax[0].axvline(0, color="k", ls=":", lw=1)
-    ax[0].set_xlabel("预报误差（实际−预报）/ kW"); ax[0].set_ylabel("频数")
-    ax[0].set_title("(a) 光伏预报误差分布"); ax[0].legend(fontsize=8)
+    ax[0].set_xlabel("预报误差（实际 - 预报）/ kW"); ax[0].set_ylabel("频数")
+    ax[0].set_title("(a) 预报误差分布（同刻口径）"); ax[0].legend(fontsize=8)
     ax[0].grid(alpha=.3)
-    # (b) 偏差订正效果（按步长）
-    ks = range(1, 25)
-    b = [bias(0, k) for k in ks]
-    s = [sigma(0, k) for k in ks]
-    ax[1].plot(list(ks), b, "o-", ms=3, lw=1.4, label="偏差（实际−预报的均值）")
-    ax[1].plot(list(ks), s, "s--", ms=3, lw=1.4, label="标准差 σ")
-    ax[1].axhline(0, color="k", ls=":", lw=1)
-    ax[1].set_xlabel("预报步长 k / 小时"); ax[1].set_ylabel("kW")
-    ax[1].set_title("(b) 0:00 发布的偏差与标准差"); ax[1].legend(fontsize=8)
-    ax[1].grid(alpha=.3)
-    # (c) 余量扫描
-    zs = [0.0, 0.25, 0.524, 0.75, 1.0]
-    tot = []
-    for z in zs:
-        days = C.run_q3(E, bias=bias, sigma=sigma, z=z)
-        sel = [d for d in days if d["d"] >= 31]
-        tot.append(sum(d["cost"] for d in sel) / 1e4)
-    ax[2].plot(zs, tot, "o-", lw=1.6)
-    j = int(np.argmin(tot))
-    ax[2].plot(zs[j], tot[j], "r*", ms=15,
-               label=f"最优 z={zs[j]}，{tot[j]:.0f} 万元")
-    ax[2].axhline(tot[0], color="k", ls=":", lw=1.2,
-                  label=f"不加余量 {tot[0]:.0f} 万元")
-    ax[2].set_xlabel("余量系数 z（余量 = z·σ）"); ax[2].set_ylabel("总费用 / 万元")
-    ax[2].set_title("(c) 分位余量的扫描"); ax[2].legend(fontsize=8)
-    ax[2].grid(alpha=.3)
+
+    # (b) 对时判据
+    mae = _mae_by_alignment(V, F)
+    names = list(mae)[::-1]; vals = [mae[n] for n in names]
+    cols = ["C7"] * len(names)
+    cols[names.index("整点 X = issue+k")] = "C3"
+    ax[1].barh(range(len(names)), vals, color=cols, alpha=.9)
+    ax[1].set_yticks(range(len(names))); ax[1].set_yticklabels(names, fontsize=8)
+    for i, v in enumerate(vals):
+        ax[1].text(v + 12, i, f"{v:.0f}", va="center", fontsize=8)
+    ax[1].set_xlabel("与附件 2 实测的 MAE / kW")
+    ax[1].set_title("(b) 判据：预报是哪个时刻的值"); ax[1].grid(alpha=.3, axis="x")
+
+    # (c) 消融
+    p = os.path.join(HERE, "out_ablation.json")
+    if os.path.exists(p):
+        import json
+        ab = json.load(open(p, encoding="utf-8"))
+        lbl = ab["labels"]; v = [x / 1e4 for x in ab["cost"]]
+        ks = list(range(len(lbl)))
+        ax[2].bar(ks, v, color=["C3", "C0", "C1", "C2"][:len(ks)], alpha=.9)
+        for i, x in enumerate(v):
+            ax[2].text(i, x + 8, f"{x:.0f}", ha="center", fontsize=8)
+        ax[2].set_xticks(ks)
+        ax[2].set_xticklabels(lbl, fontsize=8)
+        ax[2].set_ylabel("全年总费用 / 万元")
+        ax[2].set_title("(c) 消融：对时 / 订正 / 对冲")
+        ax[2].grid(alpha=.3, axis="y")
+    else:
+        ax[2].text(.5, .5, "先跑 exp_ablation_year.py\n生成 out_ablation.json",
+                   ha="center", va="center", transform=ax[2].transAxes)
     plt.tight_layout(); plt.savefig(os.path.join(FIG, "fig_c3.png"), dpi=130)
     plt.close()
-    print("fig_c3 ok", [f"{v:.1f}" for v in tot])
+    print("fig_c3 ok；对时判据 MAE =", {k: round(v, 1) for k, v in mae.items()})
 
 
 def fig4():
@@ -168,7 +197,7 @@ def fig4():
     # 四种情形的费用对比
     labels = ["问题2\n(固定电价\n完美信息)", "问题4-2\n(实时电价\n完美信息)",
               "问题3\n(固定电价\n预报+调整)", "问题4-3\n(实时电价\n预报+调整)"]
-    vals = [1225.5, 1284.1, 1496.1, 1562.6]
+    vals = [1225.5, 1284.1, 1380.3, 1444.3]
     cols = ["C0", "C1", "C2", "C3"]
     ax[2].bar(range(4), vals, color=cols, alpha=.85)
     for i, v in enumerate(vals):

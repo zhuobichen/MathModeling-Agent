@@ -72,21 +72,28 @@ def run_q2(prices, tag="", cyclic=False):
 ADJ = [(36, 6), (72, 12), (108, 18)]
 
 
-def calibrate_bias(fc, pv_act, days, horizon=24, nh=24):
-    """用给定天集合标定预报偏差 E[实际−预报]，按 (发布时刻, 步长) 分箱。
+def _residual_pool(fc, pv_act, days):
+    """按 (发布时刻, 步长) 收集预报误差。
 
-    返回 f(issue, k) -> 偏差估计（kW）。预报误差有明显的系统性成分，先订正
-    再规划能显著压低紧急购电。
+    必须**同刻**相比：附件 3 的预报是整点 τ=issue+k 的瞬时值，所以实际值也要
+    取同一整点（`D.actual_at`）。原先拿「小时均值 − 预报」当误差，会把早晚
+    爬坡段的半个小时的坡度算成偏差，订正量因此系统性偏大。
     """
     acc = {}
     for d in days:
         for iss in (0, 6, 12, 18):
-            for k in range(1, horizon + 1):
-                h = (iss + k - 1) % 24
-                if h * 6 < iss * 6:
+            for k in range(1, 25):
+                tau = iss + k
+                if tau > 24:
                     continue
                 acc.setdefault((iss, k), []).append(
-                    float(pv_act[d][h * 6:(h + 1) * 6].mean() - fc[(d, iss)][k - 1]))
+                    D.actual_at(pv_act[d], tau) - float(fc[(d, iss)][k - 1]))
+    return acc
+
+
+def calibrate_bias(fc, pv_act, days):
+    """用给定天集合标定预报偏差 E[实际−预报]，按 (发布时刻, 步长) 分箱。"""
+    acc = _residual_pool(fc, pv_act, days)
 
     def f(iss, k):
         v = acc.get((iss, k))
@@ -94,17 +101,9 @@ def calibrate_bias(fc, pv_act, days, horizon=24, nh=24):
     return f
 
 
-def calibrate_sigma(fc, pv_act, days, horizon=24):
+def calibrate_sigma(fc, pv_act, days):
     """按 (发布时刻, 步长) 标定预报误差的标准差（kW）。"""
-    acc = {}
-    for d in days:
-        for iss in (0, 6, 12, 18):
-            for k in range(1, horizon + 1):
-                h = (iss + k - 1) % 24
-                if h * 6 < iss * 6:
-                    continue
-                acc.setdefault((iss, k), []).append(
-                    float(pv_act[d][h * 6:(h + 1) * 6].mean() - fc[(d, iss)][k - 1]))
+    acc = _residual_pool(fc, pv_act, days)
 
     def f(iss, k):
         v = acc.get((iss, k))
@@ -145,14 +144,11 @@ def solve_one_day_q3(d, prices, load, pv_act, fc, soc0,
     prices = np.asarray(prices, float)
     prices = prices if prices.ndim == 1 else prices[d]
     """返回该日的计划、调整、实际执行与各项费用。"""
-    pv_fc0 = D.forecast_to_grid(fc[(d, 0)], 0)
+    # 偏差订正与保守余量都作用在**整点结点**上，再随预报一起插值到 10 分钟
+    # 网格——拿 10 分钟粒度的分段常数去调一个插值出来的曲线会两不对齐。
+    pv_fc0 = D.forecast_to_grid(fc[(d, 0)], 0, beta=bias, hedge=sigma, z=z)
     if np.isnan(pv_fc0).any():
         raise RuntimeError(f"day {d} 0:00 预报未覆盖全天")
-    # 偏差订正 + 保守余量（hedge·σ 量级，取订正后的可用偏差）
-    if bias is not None:
-        pv_fc0 = pv_fc0 + bias_grid(bias, 0)
-    if sigma is not None:
-        pv_fc0 = pv_fc0 - hedge_grid(sigma, 0, z)
     pv_fc0 = pv_fc0 - hedge
     plan = M.solve_day(prices, load, pv_fc0, soc0)
 
@@ -165,12 +161,9 @@ def solve_one_day_q3(d, prices, load, pv_act, fc, soc0,
 
     adj_log = []
     for ta, iss in ADJ:
-        pv_fc = D.forecast_to_grid(fc[(d, iss)], iss)[ta:]
-        if bias is not None:
-            pv_fc = pv_fc + bias_grid(bias, iss)[ta:]
-        if sigma is not None:
-            pv_fc = pv_fc - hedge_grid(sigma, iss, z)[ta:]
-        pv_fc = pv_fc - hedge
+        grid = D.forecast_to_grid(fc[(d, iss)], iss,
+                                  beta=bias, hedge=sigma, z=z)
+        pv_fc = grid[ta:] - hedge
         adj = M.solve_day(prices[ta:], load[ta:], pv_fc, soct[ta - 1],
                           p0=P0[ta:])
         if not adj["ok"]:
@@ -431,12 +424,20 @@ def main():
         summary[tag] = dict(days=len(sel), buy_kwh=tot_buy, cost=tot_cost,
                             emerg_kwh=tot_em)
 
-    # 预报偏差与标准差只用 1 月（前 31 天）标定，2 月起应用，避免用未来信息
-    fc_all = D.load_att3()
-    _, pv_all = D.load_att2()
-    bias = calibrate_bias(fc_all, pv_all, range(0, Q2_FIRST))
-    sigma = calibrate_sigma(fc_all, pv_all, range(0, Q2_FIRST))
-    Z_HEDGE = 0.75
+    # 问题 3 的正式口径：把附件 3 的整点预报按**结点线性插值**铺到 10 分钟网格，
+    # 不做偏差订正、不留分位余量。
+    #
+    # 这一条是实测选出来的，不是想当然。全年 334 天的消融（exp_ablation.py /
+    # exp_full_year.py）：
+    #     不对时（旧）+ 旧口径订正 + 对冲 z=0.75   14961318.24 元  紧急 405164.6 kWh
+    #     对时 + 不订正 + 不对冲                   13800482.05 元  紧急 206928.1 kWh
+    #     对时 + 不订正 + 对冲 z=0.5               13832723.36 元  紧急 175037.3 kWh
+    #     对时 + 订正 + 不对冲                     13831211.95 元  紧急 210504.7 kWh
+    # 即：对时修正本身就值 7.8%，而订正与对冲在修正后**都是负收益**——
+    # 因为原先那个「系统性偏差」正是拿整点预报去比小时均值比出来的假象。
+    Z_HEDGE = 0.0
+    bias = None
+    sigma = None
 
     for tag, prices in (("q3", E1), ("q43", A4)):
         print()

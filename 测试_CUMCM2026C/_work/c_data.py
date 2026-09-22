@@ -84,22 +84,58 @@ def load_att3():
     return out
 
 
-def forecast_to_grid(fc24, issue_hour):
-    """把「自 issue_hour 起发布的 24 个逐小时预报」铺到 144 步的 10 分钟网格。
+def actual_at(pv_day, tau):
+    """附件 2 第 j 列是时刻 (j+1)/6 小时的值，故「整点 tau」= 第 tau*6−1 列。"""
+    idx = int(round(tau * 6)) - 1
+    if idx < 0:
+        return 0.0
+    if idx >= T:
+        return float(pv_day[-1])
+    return float(pv_day[idx])
 
-    约定：预报 k 小时（k=1..24）是该次发布后**第 k 个小时**的光伏功率，
-    即覆盖小时区间 [issue_hour+k−1, issue_hour+k)。故 k=1 时正好是紧接发布的
-    那一小时。采用分段常数（小时内的 6 个 10 分钟步取同值）。
 
-    当天得不到预报的步返回 nan（例如 18:00 发布的预报只覆盖当天 18:00 之后）。
+def forecast_to_grid(fc24, issue_hour, beta=None, hedge=None, z=0.0):
+    """把「自 issue_hour 发布的 24 个逐小时预报」铺到 144 步的 10 分钟网格。
+
+    附件 3 的第 k 小时预报 fc24[k−1] 是**发布后第 k 小时整点那一瞬间**的功率，
+    不是该小时的平均值。判据是把预报与附件 2 实测在几种对时方式下比 MAE
+    （全样本 21900 个）：
+
+        整点 X = issue+k        MAE 117.15   r 0.9957   ← 真身
+        整点 X = issue+k−1      MAE 667.05   r 0.9401
+        (h, h+1] 小时均值       MAE 308.80   r 0.9856
+
+    所以正确用法是：以整点 τ_k = issue+k 为结点、取 fc24[k−1]，在结点间
+    **线性插值**到 10 分钟网格。原先的做法是把 fc24[k−1] 铺在
+    [issue+k−1, issue+k) 上（早了一小时，且小时内取常数），早晨爬坡段
+    因此系统性错位。
+
+    beta / hedge 为偏差与标准差的查表函数 f(issue, k)，同样作用在结点上
+    （也必须同刻，不能拿「小时均值口径」的偏差去订正「整点瞬时」的预报）。
+    当天得不到预报的步返回 nan。
     """
-    g = np.full(T, np.nan)
+    ts, vs = [], []
     for k in range(1, 25):
-        h = (issue_hour + k - 1) % 24
-        lo = h * 6
-        if lo < issue_hour * 6:      # 早于发布时刻 → 属于次日，本次不用
+        tau = issue_hour + k
+        if tau > 24:                 # 超出当天 → 属于次日，本次不用
             continue
-        g[lo:lo + 6] = fc24[k - 1]
+        v = float(fc24[k - 1])
+        if beta is not None:
+            v += beta(issue_hour, k)
+        if hedge is not None:
+            v -= z * hedge(issue_hour, k)
+        ts.append(tau)
+        vs.append(v)
+    g = np.full(T, np.nan)
+    if not ts:
+        return g
+    ts = np.array(ts, float)
+    vs = np.array(vs, float)
+    for j in range(T):
+        t = (j + 1) / 6.0            # 该步结束的时刻（小时）
+        if t < issue_hour:
+            continue
+        g[j] = float(np.interp(t, ts, vs))   # 早于首个结点时取平
     return g
 
 
