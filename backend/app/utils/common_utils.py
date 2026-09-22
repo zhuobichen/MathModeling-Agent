@@ -624,64 +624,84 @@ def _extract_tables_from_json(work_dir: str) -> list[dict]:
     return tables
 
 
+_GREEK = {
+    "\\alpha": "α", "\\beta": "β", "\\gamma": "γ", "\\delta": "δ",
+    "\\epsilon": "ε", "\\zeta": "ζ", "\\eta": "η", "\\theta": "θ",
+    "\\iota": "ι", "\\kappa": "κ", "\\lambda": "λ", "\\mu": "μ",
+    "\\nu": "ν", "\\xi": "ξ", "\\pi": "π", "\\rho": "ρ",
+    "\\sigma": "σ", "\\tau": "τ", "\\upsilon": "υ", "\\phi": "φ",
+    "\\chi": "χ", "\\psi": "ψ", "\\omega": "ω",
+    "\\Alpha": "Α", "\\Beta": "Β", "\\Gamma": "Γ", "\\Delta": "Δ",
+    "\\Sigma": "Σ", "\\Omega": "Ω",
+}
+
+_SUPER = str.maketrans("0123456789+-=()abcdefghijklmnoprstuvwxyz",
+                        "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ")
+
+# 只映射 **Unicode 里真有下标字形** 的字符（ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ + 数字与运算符）。
+# 原表为了凑满 26 个字母，给 b/c/d/f/g/q/w/y/z 填了脚本体或重复字母
+# （b→ₑ 会让 $x_b$ 显示成 xₑ，是错的）。宁可留着 `_b` 原样，也不要换成一个
+# 看着像下标、其实是另一个字母的字符。
+_SUB = str.maketrans("0123456789+-=()aehijklmnoprstuvx",
+                      "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ")
+
+_MATH_CMDS = {
+    "\\infty": "∞", "\\pm": "±", "\\mp": "∓", "\\cdot": "·",
+    "\\times": "×", "\\approx": "≈", "\\sim": "~", "\\leq": "≤",
+    "\\geq": "≥", "\\neq": "≠", "\\equiv": "≡", "\\propto": "∝",
+    "\\sum": "Σ", "\\prod": "Π", "\\int": "∫",
+    "\\partial": "∂", "\\nabla": "∇", "\\forall": "∀", "\\exists": "∃",
+    "\\in": "∈", "\\notin": "∉", "\\subset": "⊂", "\\subseteq": "⊆",
+    "\\rightarrow": "→", "\\leftarrow": "←", "\\Rightarrow": "⇒",
+    "\\bar": "", "\\hat": "", "\\tilde": "", "\\vec": "",
+    "\\mathbf": "", "\\mathrm": "", "\\text": "", "\\textbf": "",
+    "\\quad": " ", "\\qquad": "  ",
+}
+
+
+def _math_span_to_text(span: str) -> str:
+    """把一段 $...$ 的内容换成 Unicode 近似写法。"""
+    import re
+
+    def _sub(m):
+        s = m.group(1)
+        t = s.translate(_SUB)
+        # 没有对应下标字形时保留 "_" 本身（"x_b" 好过 "xb"，也好过错的 "xₑ"）
+        return t if t != s else "_" + s
+
+    def _sup(m):
+        s = m.group(1)
+        t = s.translate(_SUPER)
+        return t if t != s else "^" + s
+
+    for latex, uni in _GREEK.items():
+        span = span.replace(latex, uni)
+    span = re.sub(r'\^\{?([-\d]+|\w)\}?', _sup, span)
+    span = re.sub(r'_\{?([-\d]+|\w+)\}?', _sub, span)
+    for latex, uni in _MATH_CMDS.items():
+        span = span.replace(latex, uni)
+    return span.replace("{", "").replace("}", "")
+
+
 def _latex_cell_to_text(text: str) -> str:
     """将表格单元格中的 LaTeX 数学公式转为 Word 可显示的 Unicode 文本。
 
     处理内容: $...$ 定界符 / Greek字母 / 上下标 / 常见数学符号
+
+    注意转换**只在 $...$ 内部**进行。原实现把上下标规则无条件套在整格文字上，
+    于是文件名里的下划线被当成下标：`c_data.py` 变成 `c𝒹ₐₜₐ.py`，
+    `c_figs.py` 变成 `c𝒻ᵢ𝓰ₛ.py`（附录的文件清单表整列都花了）。
+    下划线在表格里是极常见的普通字符，不能当作数学记号。
     """
     import re
 
-    # 1. 移除 $ 定界符
-    text = re.sub(r'\$(.+?)\$', r'\1', text)
-
-    # 2. Greek 字母
-    GREEK = {
-        "\\alpha": "α", "\\beta": "β", "\\gamma": "γ", "\\delta": "δ",
-        "\\epsilon": "ε", "\\zeta": "ζ", "\\eta": "η", "\\theta": "θ",
-        "\\iota": "ι", "\\kappa": "κ", "\\lambda": "λ", "\\mu": "μ",
-        "\\nu": "ν", "\\xi": "ξ", "\\pi": "π", "\\rho": "ρ",
-        "\\sigma": "σ", "\\tau": "τ", "\\upsilon": "υ", "\\phi": "φ",
-        "\\chi": "χ", "\\psi": "ψ", "\\omega": "ω",
-        "\\Alpha": "Α", "\\Beta": "Β", "\\Gamma": "Γ", "\\Delta": "Δ",
-        "\\Sigma": "Σ", "\\Omega": "Ω",
-    }
-    for latex, uni in GREEK.items():
-        text = text.replace(latex, uni)
-
-    # 3. 上标 ^X → ˣ
-    SUPER = str.maketrans("0123456789+-=()abcdefghijklmnoprstuvwxyz",
-                           "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ")
-    def _replace_sup(m):
-        return m.group(1).translate(SUPER)
-    text = re.sub(r'\^\{?(-?\d+|\w)\}?', _replace_sup, text)
-
-    # 4. 下标 _X → ₓ
-    SUB = str.maketrans("0123456789+-=()abcdefghijklmnoprstuvwxyz",
-                         "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑ𝒸𝒹ₑ𝒻𝓰ₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥ𝓌ₓᵧ𝓏")
-    def _replace_sub(m):
-        return m.group(1).translate(SUB)
-    text = re.sub(r'_\{?(-?\d+|\w+)\}?', _replace_sub, text)
-
-    # 5. 常见数学命令
-    MATH_CMDS = {
-        "\\infty": "∞", "\\pm": "±", "\\mp": "∓", "\\cdot": "·",
-        "\\times": "×", "\\approx": "≈", "\\sim": "~", "\\leq": "≤",
-        "\\geq": "≥", "\\neq": "≠", "\\equiv": "≡", "\\propto": "∝",
-        "\\sum": "Σ", "\\prod": "Π", "\\int": "∫",
-        "\\partial": "∂", "\\nabla": "∇", "\\forall": "∀", "\\exists": "∃",
-        "\\in": "∈", "\\notin": "∉", "\\subset": "⊂", "\\subseteq": "⊆",
-        "\\rightarrow": "→", "\\leftarrow": "←", "\\Rightarrow": "⇒",
-        "\\bar": "", "\\hat": "", "\\tilde": "", "\\vec": "",
-        "\\mathbf": "", "\\mathrm": "", "\\text": "", "\\textbf": "",
-        "\\quad": " ", "\\qquad": "  ",
-    }
-    for latex, uni in MATH_CMDS.items():
-        text = text.replace(latex, uni)
-
-    # 6. 清理残留的大括号
-    text = text.replace("{", "").replace("}", "")
-
-    return text.strip()
+    out = []
+    for part in re.split(r'(\$[^$]*\$)', text):
+        if len(part) >= 2 and part.startswith("$") and part.endswith("$"):
+            out.append(_math_span_to_text(part[1:-1]))
+        else:
+            out.append(part)          # 非数学部分原样保留
+    return "".join(out).strip()
 
 def _insert_tables_into_docx(doc, tables_data: list[dict],
                               cn_font: str, cn_heading_font: str, en_font: str) -> int:
@@ -917,6 +937,10 @@ def _sync_template_styles(template_path: str, target_path: str,
     h3_pattern = re.compile(r"^\d+\.\d+\.\d+\s")            # "1.1.1 思路"
     abstract_pattern = re.compile(r"^摘要")                   # "摘要"
     fig_caption = re.compile(r"^(?:\*\*)?图\d+[：:）\)]")       # "**图1: xxx**" 或 "图1：xxx" (pandoc会去掉**)
+    # 表题注 "**表1: xxx**"。原先只认图注，表题注落到 else 分支被当成正文：
+    # 宋体小四 + 首行缩进两字，读起来像正文里的一句话而不是表名。
+    # 要求数字后紧跟冒号，"表 1、表 2 的格式"这类正文引用不会被误判。
+    tbl_caption = re.compile(r"^表\s*\d+[：:]")
 
     formatted = {"h1": 0, "h2": 0, "h3": 0, "body": 0, "title": 0, "abstract": 0}
 
@@ -940,6 +964,7 @@ def _sync_template_styles(template_path: str, target_path: str,
 
         # 图注行：居中，宋体小五
         is_fig_caption = bool(fig_caption.match(text))
+        is_tbl_caption = bool(tbl_caption.match(text))
 
         # 判断段落角色
         is_title = (i == title_idx)
@@ -948,7 +973,20 @@ def _sync_template_styles(template_path: str, target_path: str,
         is_h2 = h2_pattern.match(text)
         is_h3 = h3_pattern.match(text)
 
-        if is_fig_caption:
+        # 文本模式认不出、但 pandoc 已按 Markdown 层级给了 Heading 样式的，
+        # 退回样式判断。原本只有上面三条文本正则，于是「参考文献」「附录」
+        # 「附录 A 支撑材料文件列表」这类不带"一、"/"1.1"编号的标题全部落到
+        # else 分支，被按正文重排（宋体小四、首行缩进），标题层级看起来断掉了。
+        if not (is_title or is_abstract or is_h1 or is_h2 or is_h3):
+            _sty = (p.style.name or "").lower()
+            if _sty.startswith("heading 1"):
+                is_h1 = True
+            elif _sty.startswith("heading 2"):
+                is_h2 = True
+            elif _sty.startswith("heading 3"):
+                is_h3 = True
+
+        if is_fig_caption or is_tbl_caption:
             _apply_fig_caption_format(p, Pt(10), CN_FONT, EN_FONT)
             formatted["body"] += 1
         elif is_title:
@@ -978,6 +1016,12 @@ def _sync_template_styles(template_path: str, target_path: str,
         if para_idx == title_idx:
             continue
         if h1_pattern.match(text) or h2_pattern.match(text) or h3_pattern.match(text) or abstract_pattern.match(text):
+            continue
+        if tbl_caption.match(text):
+            continue
+        # 标题一律不缩进：文本正则漏掉的标题（如「问题 1」「附录 C 复现方式」）
+        # 也靠 pandoc 给的 Heading 样式兜住。
+        if (p.style.name or "").lower().startswith("heading"):
             continue
         if p.paragraph_format.first_line_indent is None:
             p.paragraph_format.first_line_indent = Pt(24)
