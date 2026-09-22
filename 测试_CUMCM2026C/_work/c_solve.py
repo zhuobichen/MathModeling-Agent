@@ -59,6 +59,7 @@ def run_q2(prices, tag="", cyclic=False):
         # 完美信息下不会缺额；仍按实际（=计划）核一遍
         em = np.maximum(load[d] + sol["ch"] + sol["cur"]
                         - pv[d] - sol["buy"] - sol["dis"], 0.0)
+        em[em * M.DT < EM_TOL_KWH] = 0.0     # 见 EM_TOL_KWH 的说明
         days.append(dict(d=d, sol=sol, soc0=soc, soc1=float(sol["soc"][-1]),
                          emerg=em,
                          emerg_kwh=float(em.sum() * M.DT),
@@ -200,6 +201,7 @@ def solve_one_day_q3(d, prices, load, pv_act, fc, soc0,
     # 供给 = 光伏 + 购电 + 放电；它必须不低于负荷。充电是"额外负荷"，在光伏
     # 不足时应当先削减充电，而不是买紧急电，故紧急量里**不含充电**。
     em = np.maximum(load - pv_act - buyt - dist, 0.0)
+    em[em * M.DT < EM_TOL_KWH] = 0.0     # 见 EM_TOL_KWH 的说明
     # 实际充入电量：先满足负荷，余量才拿去充电（不超过计划值）
     avail = np.maximum(pv_act + buyt + dist - load, 0.0)
     ch_act = np.minimum(cht, avail)
@@ -230,21 +232,29 @@ def run_q3(prices, tag="", bias=None, hedge=0.0, days_range=None,
 # ══════════════════════════════════════════════════════════
 # 结果文件写出
 # ══════════════════════════════════════════════════════════
-TIME_LABELS = []
-for i in range(M.T):
-    a = (i * 10) % 1440
-    b = ((i + 1) * 10) % 1440
-    def fmt(x):
-        if x == 0:
-            return "0:00"
-        h, m = divmod(x, 60)
-        return f"{h}:{m:02d}" if x < 1440 else "0:00+1"
-    if i == M.T - 1:
-        TIME_LABELS.append("0:00+1-0:10+1")
-    else:
-        h1, m1 = divmod(i * 10, 60)
-        h2, m2 = divmod((i + 1) * 10, 60)
-        TIME_LABELS.append(f"{h1}:{m1:02d}-{h2}:{m2:02d}")
+def _grid_label(k):
+    """第 k 个 10 分钟格点（k=0..144）的标签，按附件 1 的写法。"""
+    if k <= 0:
+        return "0:00"
+    if k >= M.T:
+        return "0:00+1"
+    h, m = divmod(k * 10, 60)
+    return f"{h}:{m:02d}"
+
+
+# 附件 5 的模板把 144 个标签写成了 0:10-0:20 … 0:00+1-0:10+1：它拿附件 1 的
+# 144 个时刻（0:10 … 0:00+1）两两配对当区间，于是整列右移了一格——少了
+# [0:00,0:10) 这一段，末尾多出一个并不存在的 [0:00+1,0:10+1)。
+# 附件 1 给的是 144 个时刻、每格代表「以该时刻结尾的 10 分钟」，故正确的
+# 区间标签是 0:00-0:10 … 23:50-0:00+1。位置顺序与模板一致，只是把最后
+# 一格的名字写对（论文附录 B 说明了这一点）。
+TIME_LABELS = [f"{_grid_label(i)}-{_grid_label(i + 1)}" for i in range(M.T)]
+
+
+def _day_date(d):
+    """2025 年的第 d 天（0 基）→ datetime，与附件 5 模板的日期列一致。"""
+    import datetime
+    return datetime.datetime(2025, 1, 1) + datetime.timedelta(days=d)
 
 
 def _period_label(a, b):
@@ -295,8 +305,8 @@ def write_result_daywise(path, days, start_idx, with_adjust=False,
         ws.cell(1, M.T + 2, "全天购电量")
         ws.cell(1, M.T + 3, "全天购电费")
         for i, x in enumerate(sel):
-            m, dd = D.day_label(x["d"])
-            ws.cell(i + 2, 1, f"2025-{m:02d}-{dd:02d}")
+            c = ws.cell(i + 2, 1, _day_date(x["d"]))
+            c.number_format = "yyyy/m/d"
             P = getter(x)
             for j in range(M.T):
                 ws.cell(i + 2, j + 2, round(float(P[j] * M.DT), 4))
@@ -319,8 +329,8 @@ def write_result_daywise(path, days, start_idx, with_adjust=False,
         ws3.cell(1, j + 1, h)
     row = 2
     for x in sel:
-        m, dd = D.day_label(x["d"])
-        ws3.cell(row, 1, f"2025-{m:02d}-{dd:02d}")
+        c = ws3.cell(row, 1, _day_date(x["d"]))
+        c.number_format = "yyyy/m/d"
         ch = x["cht"] if with_adjust else x["sol"]["ch"]
         dis = x["dist"] if with_adjust else x["sol"]["dis"]
         ps = D.period_sums(ch, dis)
@@ -337,10 +347,10 @@ def write_result_daywise(path, days, start_idx, with_adjust=False,
         ws4.cell(1, j + 1, h)
     row = 2
     for x in sel:
-        m, dd = D.day_label(x["d"])
         em = x["emerg"]
         segs = _emergency_segments(em)
-        ws4.cell(row, 1, f"2025-{m:02d}-{dd:02d}")
+        c = ws4.cell(row, 1, _day_date(x["d"]))
+        c.number_format = "yyyy/m/d"
         if not segs:
             row += 1
             continue
@@ -351,9 +361,17 @@ def write_result_daywise(path, days, start_idx, with_adjust=False,
     wb.save(path)
 
 
-def _emergency_segments(em, tol=1e-6):
+# 单步（10 分钟）紧急购电量低于此值就当作 0。结果文件保留 4 位小数，
+# 1e-3 kWh 以下本来也只在第 4 位上晃；而线代求解器的可行性容差会在
+# 「计划刚好够用」的时段留下 1e-3 kWh 量级的残差——若不过滤，这些
+# 0.0006 kWh 的假时段会占据紧急购电表的大半行数，读的人无从判断
+# 哪些是真缺额。1e-3 kWh/步 = 6 W，对全天费用影响 <1 元。
+EM_TOL_KWH = 1e-3
+
+
+def _emergency_segments(em, min_step_kwh=EM_TOL_KWH):
     """把逐 10 分钟的紧急购电功率合并成连续时段。"""
-    idx = np.where(em > tol)[0]
+    idx = np.where(em * M.DT >= min_step_kwh)[0]
     if len(idx) == 0:
         return []
     segs, s = [], idx[0]
@@ -431,9 +449,11 @@ def main():
         tot_plan = sum(x["cost_plan"] for x in sel)
         tot_em = sum(x["cost_em"] for x in sel)
         em_kwh = sum(x["emerg_kwh"] for x in sel)
-        n_em_days = sum(1 for x in sel if x["emerg_kwh"] > 1e-6)
+        n_em_days = sum(1 for x in sel if x["emerg_kwh"] > 0)
+        n_em_steps = sum(int((x["emerg"] > 0).sum()) for x in sel)
         print(f"  {len(sel)} 天  计划与调整结算 {tot_plan:.2f} 元   紧急购电费 {tot_em:.2f} 元")
-        print(f"  紧急购电量 {em_kwh:.1f} kWh，发生在 {n_em_days} 天")
+        print(f"  紧急购电量 {em_kwh:.1f} kWh，发生在 {n_em_days} 天 / "
+              f"{n_em_steps} 个 10 分钟时段（已滤除 <{EM_TOL_KWH} kWh/步 的求解器残差）")
         print(f"  合计 {tot_plan+tot_em:.2f} 元")
         fn = "result3.xlsx" if tag == "q3" else "result4-3.xlsx"
         write_result_daywise(os.path.join(OUT, fn), days, Q2_FIRST,

@@ -1,0 +1,5 @@
+2026-09-22 21:51:51.979 | INFO     | [-:-] | app.utils.common_utils:md_2_docx:221 - 使用论文模板: D:\github_project\ZhaoWen_GitHub维护\MathModeling-Agent\backend\templates\论文模板.docx
+2026-09-22 21:51:51.994 | INFO     | [-:-] | app.utils.common_utils:_extract_html_tables:572 - HTML 表格提取: 32 个 → 占位符，res.md 已清洗
+2026-09-22 21:51:52.507 | INFO     | [-:-] | app.utils.common_utils:md_2_docx:244 - DOCX 转换完成: project\work_dir\cumcm2026c_paper\res.docx
+2026-09-22 21:51:52.815 | INFO     | [-:-] | app.utils.common_utils:_insert_tables_into_docx:830 - Word 表格插入: 32 个 (python-docx 直接建表)
+2026-09-22 21:51:52.857 | INFO     | [-:-] | app.utils.common_utils:_sync_template_styles:1036 - 格式注入完成: H1=13 H2=33 H3=4 Body=179 Tables=32

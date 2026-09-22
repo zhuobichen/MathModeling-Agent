@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import numpy as np
@@ -122,10 +123,76 @@ def check_totals():
         print(f"  {'':<16} 紧急购电量 {tot:>14.1f} kWh")
 
 
+def check_templates():
+    """逐列比对：写出的 5 个结果文件 vs 附件 5 模板。
+
+    论文里「结构与附件 5 模板逐列比对通过」这句话应当有可执行的依据，
+    所以这里把模板也读进来比对工作表名、表头、列数与行数，而不是靠人工看。
+    比对的是**结构**：模板只填了前几行样例，行数自然对不上，故行数只做
+    「不少于模板的样例行数」的检查，不对齐具体值。
+    """
+    print()
+    print("=" * 76)
+    print("【结构】与附件 5 模板逐列比对")
+    print("=" * 76)
+    ok = True
+    for fn in ("result1.xlsx", "result2.xlsx", "result3.xlsx",
+               "result4-2.xlsx", "result4-3.xlsx"):
+        tpl = os.path.join(ATT5, fn)
+        got = os.path.join(OUT, fn)
+        wt = openpyxl.load_workbook(tpl)
+        wg = openpyxl.load_workbook(got, data_only=True)
+        msgs = []
+        if wg.sheetnames != wt.sheetnames:
+            msgs.append(f"工作表名不符：模板 {wt.sheetnames}，实际 {wg.sheetnames}")
+        for sn in wt.sheetnames:
+            if sn not in wg.sheetnames:
+                continue
+            st, sg = wt[sn], wg[sn]
+            if sg.max_column != st.max_column:
+                msgs.append(f"[{sn}] 列数 {sg.max_column} ≠ 模板 {st.max_column}")
+            def _norm(v):
+                # 模板里有一个孤立的写法错误「7:0-7:10」（分钟没补零），
+                # 其余都是「7:00-7:10」。比对前把单个数字的分钟补成两位，
+                # 否则会把模板自己的笔误报成我们的差异。
+                if isinstance(v, str):
+                    return re.sub(r"(?<=:)(\d)(?!\d)", r"0\1", v)
+                return v
+
+            ht = [_norm(st.cell(1, c).value) for c in range(1, st.max_column + 1)]
+            hg = [_norm(sg.cell(1, c).value) for c in range(1, sg.max_column + 1)]
+            # 计划/调整购电量表的时间标签有一处**已知且已在附录 B.1 说明**的
+            # 差异：模板把附件 1 的 144 个时刻两两配对当区间，整列右移一格。
+            # 这里把「仅这一栏按左移一格逐项相等」认作符合，其余任何表头差异
+            # 都算失败——差异必须是可解释的，不能是「反正都不同就算了」。
+            if hg != ht:
+                # 模板第 i 行 = 本文第 i+1 个区间，故模板的前 143 个标签应
+                # 逐个等于本文的标签 2…144；末两列（全天购电量/购电费）须一致。
+                shifted = (len(ht) == len(hg) and hg[0] == ht[0]
+                           and ht[1:M.T] == hg[2:M.T + 1]
+                           and hg[M.T + 1:] == ht[M.T + 1:])
+                if shifted:
+                    msgs.append(
+                        f"[{sn}] 时间标签按已知约定左移一格（附录 B.1，视为符合）")
+                else:
+                    msgs.append(
+                        f"[{sn}] 表头不符：模板 {ht[:3]}…，实际 {hg[:3]}…")
+            if sg.max_row < st.max_row:
+                msgs.append(f"[{sn}] 行数 {sg.max_row} 少于模板样例 {st.max_row}")
+        hard = [m for m in msgs if "视为符合" not in m]
+        flag = "OK " if not hard else "!! "
+        print(f"  {flag}{fn:<16} {len(wg.sheetnames)} 个工作表")
+        for m in msgs:
+            print(f"       - {m}")
+        ok &= not hard
+    return ok
+
+
 if __name__ == "__main__":
     a = check_result1()
     b = check_daywise("result2.xlsx", D.load_att1()[0])
     c = check_daywise("result4-2.xlsx", D.load_att4())
     check_totals()
+    d = check_templates()
     print()
-    print("总体:", "通过" if (a and b and c) else "**有失败项**")
+    print("总体:", "通过" if (a and b and c and d) else "**有失败项**")
