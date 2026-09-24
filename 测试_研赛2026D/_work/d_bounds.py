@@ -33,9 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 def main():
     W = World()
-    g1 = build_groups(W, allow_types=("A", "B"))[0]
-    plan = schedule(W, g1)
-    ev = evaluate(W, plan)
+    g1, plan, ev = build_groups(W, allow_types=("A", "B"))
 
     print("=" * 78)
     print("【下界 1】架次数：容量下限与精确装箱")

@@ -25,8 +25,9 @@ CASES = {
         ["S002","S003","S005","S007","S008","S009","S015"]],
     "K=3 地理均衡型": [["S001","S002","S005","S009","S010","S011","S012","S013","S014"],
                      ["S003","S006","S007","S015"], ["S004","S008"]],
-    "K=3 资源缺口型": [["S001","S005","S008","S009","S010","S011","S012","S014"],
-                     ["S002","S003","S007","S015"], ["S004","S006","S013"]],
+    "K=3 资源缺口型（全局最优）": [
+        ["S001","S002","S003","S005","S007","S008","S009","S015"],
+        ["S004","S006","S013"], ["S010","S011","S012","S014"]],
 }
 
 def main():
@@ -35,6 +36,7 @@ def main():
     C = D.Comms(W.geo, W.nodes, D.load_comm())
     g1, p1, e1 = build_groups(W, allow_types=("A", "B"))
     q3 = json.load(open(os.path.join(HERE, "out_q3.json"), encoding="utf-8"))
+    T_SHIFT = float(q3.get("t_shift", 0.0))
     st = q3["stations"]
     print(f"运输 {len(p1)} 架次 / 完成 {e1['t_done']:.0f} s（不分区基准）\n")
     out = {}
@@ -45,7 +47,7 @@ def main():
         subs = [[p1[k]["stops"] for k in gg] for gg in idxs]
         # 跨组架次（应为 0）
         cross = sum(1 for x in p1 if len({gid[s] for s, _ in x["stops"]}) > 1)
-        alloc = Q4.best_allocation(W, subs, t_shift=0.0)
+        alloc = Q4.best_allocation(W, subs, t_shift=T_SHIFT)
         nd = {g: sum(alloc["per_group"][j]["cap"][g] for j in range(len(subs))) for g in TYPES}
         gap_d = sum(max(0, nd[g] - INV["drone"][g]) for g in TYPES)
         # 中继：各组需要哪些站位

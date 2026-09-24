@@ -63,9 +63,7 @@ def main():
     for name, cm, cv in CAPS:
         W = World()
         W.cap_m, W.cap_v = cm, cv
-        g = build_groups(W, allow_types=("A", "B"))[0]
-        p = schedule(W, g)
-        e = evaluate(W, p)
+        g, p, e = build_groups(W, allow_types=("A", "B"))
         u = util(p, e, stock(W))
         rows.append(dict(name=name, cm=cm, cv=cv, n=e["n_sorties"],
                          t=e["t_done"], E=e["E"], util=u,
@@ -83,7 +81,8 @@ def main():
     print(f"{'顺序':<32}{'架次':>6}{'完成/s':>9}{'能耗/kWh':>10}"
           f"{'首批违约':>9}{'医疗违约':>9}")
     W = World()
-    g1 = build_groups(W, allow_types=("A", "B"))[0]
+    # 这一步比的是**固定规则**，所以取未做顺序搜索的组批，保证各行的起点相同
+    g1 = build_groups(W, allow_types=("A", "B"), optimise=False)[0]
     rows = []
     for name, key in ORDERS:
         p = schedule_ordered(W, g1, key)
@@ -92,6 +91,14 @@ def main():
                          E=e["E"], vf=e["viol_first"], vm=e["viol_med"]))
         print(f"{name:<32}{e['n_sorties']:>6}{e['t_done']:>9.0f}{e['E']:>10.2f}"
               f"{e['viol_first']:>9}{e['viol_med']:>9}")
+    # 补一行：在最好的规则之上再做顺序局部搜索（本文正式采用）
+    gopt, popt, eopt = build_groups(W, allow_types=("A", "B"))
+    rows.append(dict(name="＋顺序局部搜索（正式）", key="local-search",
+                     n=eopt["n_sorties"], t=eopt["t_done"], E=eopt["E"],
+                     vf=eopt["viol_first"], vm=eopt["viol_med"]))
+    print(f"{'＋顺序局部搜索（正式）':<32}{eopt['n_sorties']:>6}"
+          f"{eopt['t_done']:>9.0f}{eopt['E']:>10.2f}"
+          f"{eopt['viol_first']:>9}{eopt['viol_med']:>9}")
     out["order"] = rows
 
     # ── 机队规模扫描 ────────────────────────────────────────
@@ -104,9 +111,7 @@ def main():
     base = None
     for name, fl in FLEETS:
         W = World()
-        g = build_groups(W, allow_types=("A", "B"))[0]
-        p = schedule(W, g, fleet=fl)
-        e = evaluate(W, p)
+        g, p, e = build_groups(W, allow_types=("A", "B"), fleet=fl)
         u = util(p, e, fl)
         if base is None:
             base = e["t_done"]

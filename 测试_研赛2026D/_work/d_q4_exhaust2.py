@@ -40,7 +40,7 @@ def main():
     W = World()
     rt, W.relays, W.rbats = D.load_relays()
     C = D.Comms(W.geo, W.nodes, D.load_comm())
-    g1 = build_groups(W, allow_types=("A", "B"))[0]
+    g1 = build_groups(W, allow_types=("A", "B"))[0]   # 顺序搜索用不上（这里只做分区枚举）
     p1 = schedule(W, g1)
     P.p1_stub = p1
     with open(os.path.join(HERE, "out_q3.json"), encoding="utf-8") as f:

@@ -51,6 +51,7 @@ def main():
     with open(os.path.join(HERE, "out_q3.json"), encoding="utf-8") as f:
         q3 = json.load(f)
     stations = q3["stations"]
+    T_SHIFT = float(q3.get("t_shift", 0.0))
     sidx = {s: i for i, s in enumerate(sorted({x["stops"][0][0] for x in p1}))}
     sites = sorted(sidx)
     n = len(sites)
@@ -118,7 +119,7 @@ def main():
         idxs = [[k for k, x in enumerate(p1) if x["stops"][0][0] in gp]
                 for gp in groups]
         subs = [[p1[k]["stops"] for k in gg] for gg in idxs]
-        alloc = Q4.best_allocation(W, subs, t_shift=0.0)
+        alloc = Q4.best_allocation(W, subs, t_shift=T_SHIFT)
         nd = {g: sum(alloc["per_group"][j]["cap"][g] for j in range(3))
               for g in TYPES}
         gap_d = sum(max(0, nd[g] - INV["drone"][g]) for g in TYPES)

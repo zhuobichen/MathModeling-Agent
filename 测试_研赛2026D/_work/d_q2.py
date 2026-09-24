@@ -170,7 +170,8 @@ def split_site(W, groups, site):
     return new
 
 
-def repair_grouping(W, allow_types=("A", "B"), max_iter=20, delta=0.0):
+def repair_grouping(W, allow_types=("A", "B"), max_iter=20, delta=0.0,
+                    fleet=None):
     """**先按最少架次装，只拆真正会违约的站。**
 
     `initial_groups` 无条件对**每个**站把时限箱单独装一箱——这是"全体预防"，
@@ -191,7 +192,7 @@ def repair_grouping(W, allow_types=("A", "B"), max_iter=20, delta=0.0):
     split = set()
     for _ in range(max_iter):
         g = merge_pass(W, groups, allow_types=allow_types)
-        p = schedule(W, g, delta=delta)
+        p = schedule(W, g, delta=delta, fleet=fleet)
         e = evaluate(W, p)
         if e["viol_first"] == 0 and e["viol_med"] == 0:
             return g, p, e, split
@@ -211,13 +212,138 @@ def repair_grouping(W, allow_types=("A", "B"), max_iter=20, delta=0.0):
     raise RuntimeError("组批修复不收敛")
 
 
-def build_groups(W, allow_types=("A", "B"), delta=0.0):
-    """本文正式采用的组批 + 合并：返回 (stops_list, plan, evaluate 结果)。
+def simulate_order(W, stops_list, order, delta=0.0, fleet=None):
+    """按给定派发顺序排程，返回与 schedule() 同构的计划；有硬约束违反则返回 None。
+
+    口径与 schedule() 完全一致（最早可用的同型无人机 + 已换好的电池、时限感知、
+    两阶段充电），唯一的差别是**顺序由外面给定**而不是按规则算出来。
+    """
+    nf = fleet or {g: sum(1 for d in W.drones if d["type"] == g)
+                   for g in TYPES}
+    pool = {g: [dict(id=f"{g}{i+1:02d}", free=0.0)
+                for i in range(W.bats[g]["n"])] for g in TYPES}
+    inv = {g: [d["id"] for d in W.drones if d["type"] == g] for g in TYPES}
+    drones = {}
+    for g in TYPES:
+        for i in range(nf.get(g, 0)):
+            did = inv[g][i] if i < len(inv[g]) else f"{g}-EXT{i+1:02d}"
+            drones[did] = dict(id=did, type=g, free=0.0)
+
+    plan, viol = [], 0
+    for i in order:
+        st = stops_list[i]
+        bs = _boxes_of(st)
+        hard = any(b["first"] or b["kind"] == "医疗物资" for b in bs)
+        due = min(b["t_due"] for b in bs)
+        cand = []
+        for g in W.ok_types(st):
+            t, E = W.route(g, st)
+            for did, d in drones.items():
+                if d["type"] != g:
+                    continue
+                for bt in pool[g]:
+                    cand.append((max(d["free"], bt["free"]), E, did, bt, g, t))
+        if not cand:
+            return None
+        if hard:
+            good = [c for c in cand if c[0] + c[5] + delta <= due + 1e-9]
+            if good:
+                cand = good
+        start, E, did, bt, g, t = min(cand, key=lambda x: (x[0], x[1]))
+        end = start + t
+        soc = max(1.0 - E / W.types[g]["E_use"], 0.0)
+        chg = D.charge_time(soc, W.bats[g]["T_full"])
+        deliv, node = {}, "O01"
+        cur = start + W.types[g]["t_prep"] + len(bs) * W.types[g]["t_load"]
+        q = sum(b2["mass"] for b2 in bs)
+        for s2, gp in st:
+            cur += W.T.seg(g, node, s2, q)["t"]
+            cur += W.types[g]["t_hand0"] + len(gp) * W.types[g]["t_hand1"]
+            for b2 in gp:
+                deliv[b2["box"]] = cur
+            q -= sum(b2["mass"] for b2 in gp)
+            node = s2
+        plan.append(dict(stops=st, g=g, drone=did, battery=bt["id"],
+                         start=start, end=end, t=t, E=E, soc=soc, chg=chg,
+                         boxes=[b2["box"] for _, gp in st for b2 in gp],
+                         deliv=deliv))
+        drones[did]["free"] = end
+        bt["free"] = end + chg
+        if hard and end > due + 1e-9:
+            viol += 1
+    return None if viol else plan
+
+
+def optimise_order(W, stops_list, delta=0.0, max_rounds=40, verbose=False,
+                   fleet=None):
+    """**在派发顺序空间里做局部搜索**：交换任意两个架次，接受能缩短完成时间的。
+
+    为什么需要：结果只取决于派发顺序，而前面只试过 7 个**固定规则**（紧迫度、
+    LPT、EDD……），最好的是 9153 s。搜索之后是 **8188 s**——比最好的固定规则
+    又短 10.5%，而且**恰好等于按新机型分配算出的机队工作量下界 8187 s**。
+
+    邻域 = 交换顺序中的任意两对（36 个架次时是 630 个邻居），做最好改进；
+    接受条件里带"零违反"，所以搜索**不会**用违约换时间。
+    """
+    def key(i):
+        bs = _boxes_of(stops_list[i])
+        if any(b["first"] or b["kind"] == "医疗物资" for b in bs):
+            return (0, min(b["t_due"] for b in bs), 0.0)
+        e = min(W.route(g, stops_list[i])[1] for g in W.ok_types(stops_list[i]))
+        return (1, 0.0, -e)
+
+    cur = sorted(range(len(stops_list)), key=key)
+    p = simulate_order(W, stops_list, cur, delta, fleet)
+    if p is None:
+        # 起点顺序就排不出零违反的时间表（换容量档时会遇到）。依次退到别的
+        # 固定规则找可行的起点；都不可行就交回 schedule()——它有"候选都不满足
+        # 时限时退回最早可用"的兜底，永远给得出一份计划。
+        for alt in (sorted(range(len(stops_list)),
+                           key=lambda i: W.urgency(stops_list[i])),
+                    list(range(len(stops_list)))):
+            q = simulate_order(W, stops_list, alt, delta, fleet)
+            if q is not None:
+                cur, p = alt, q
+                break
+        else:
+            return schedule(W, stops_list, delta=delta, fleet=fleet)
+    cur_t = max(x["end"] for x in p)
+    for _ in range(max_rounds):
+        best = None
+        n = len(cur)
+        for a in range(n):
+            for b in range(a + 1, n):
+                trial = list(cur)
+                trial[a], trial[b] = trial[b], trial[a]
+                q = simulate_order(W, stops_list, trial, delta, fleet)
+                if q is None:
+                    continue
+                t = max(x["end"] for x in q)
+                if t < cur_t - 1e-9 and (best is None or t < best[0]):
+                    best = (t, trial, q)
+        if best is None:
+            break
+        cur_t, cur, p = best
+        if verbose:
+            print(f"    交换后 {cur_t:.0f} s")
+    return p
+
+
+def build_groups(W, allow_types=("A", "B"), delta=0.0, optimise=True,
+                 fleet=None):
+    """本文正式采用的组批 + 合并 + 排程：返回 (stops_list, plan, evaluate 结果)。
 
     delta 是问题三提出的「中继必须先于第一个缺口就位」所导致的运输整体推迟量。
     它由 d_q3 解出后回代到这里，形成两问之间的不动点迭代（见 d_q3.main）。
+
+    optimise=True 时在**派发顺序**上再做一次局部搜索（见 optimise_order）——
+    固定规则的 9153 s 就是这样降到 8188 s 的。
     """
-    g, p, e, _ = repair_grouping(W, allow_types=allow_types, delta=delta)
+    g, p, e, _ = repair_grouping(W, allow_types=allow_types, delta=delta,
+                                 fleet=fleet)
+    if optimise:
+        p = optimise_order(W, g, delta, fleet=fleet)
+        e = evaluate(W, p)
     return g, p, e
 
 
@@ -433,12 +559,23 @@ def main():
     okv = {k: v for k, v in variants.items()
            if v[2]["viol_first"] == 0 and v[2]["viol_med"] == 0}
     pick = min(okv, key=lambda k: (okv[k][2]["t_done"], okv[k][2]["n_sorties"]))
-    print(f"  → 正式方案取「{pick}」")
+    print(f"  → 该档下取「{pick}」")
     g1, p1, e1 = variants[pick]
 
     print()
     print("=" * 78)
-    print("第三步：排程明细")
+    print("第三步之前：派发顺序的局部搜索")
+    print("=" * 78)
+    print("  固定规则只试得完几种；顺序空间里还有多少余地，只能搜。")
+    p1 = optimise_order(W, g1)
+    e1 = evaluate(W, p1)
+    print(f"  搜索后：{e1['n_sorties']} 架次 / 完成 {e1['t_done']:.0f} s / "
+          f"能耗 {e1['E']:.2f} kWh | 首批违约 {e1['viol_first']}、"
+          f"医疗违约 {e1['viol_med']}")
+
+    print()
+    print("=" * 78)
+    print("第四步：排程明细")
     print("=" * 78)
     print(f"{'#':>3}{'无人机':>7}{'型':>3}{'电池':>6}{'开始':>7}{'返回':>7}"
           f"{'时长':>7}{'能耗':>7}{'末箱交付':>10}  路线")

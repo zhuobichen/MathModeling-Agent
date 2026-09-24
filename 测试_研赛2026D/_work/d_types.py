@@ -75,9 +75,7 @@ def schedule_forced(W, stops_list, g, n):
 
 def main():
     W = World()
-    stops = build_groups(W, allow_types=("A", "B"))[0]
-    p = schedule(W, stops)
-    ev = evaluate(W, p)
+    stops, p, ev = build_groups(W, allow_types=("A", "B"))
     print("=" * 78)
     print("本文方案（完成时间优先的机型分配）")
     print("=" * 78)

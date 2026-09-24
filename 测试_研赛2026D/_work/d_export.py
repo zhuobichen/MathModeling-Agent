@@ -39,9 +39,7 @@ def main():
     # ── 问题一 ──
     q1 = json.load(open(os.path.join(HERE, "out_q1.json"), encoding="utf-8"))
     # ── 问题二 ──
-    g1 = build_groups(W, allow_types=("A", "B"))[0]
-    p1 = schedule(W, g1)
-    e1 = evaluate(W, p1)
+    g1, p1, e1 = build_groups(W, allow_types=("A", "B"))
     # ── 问题三：中继 ──
     # 直接读 out_q3.json 的最终方案（3 站）。**不要在这里现算**：d_q3 原来的
     # cluster_stations + station_plan 覆盖判据有高估（d_relay.py 有说明），

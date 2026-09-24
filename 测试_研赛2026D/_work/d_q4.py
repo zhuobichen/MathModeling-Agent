@@ -387,9 +387,7 @@ def main():
     W = World()
     rt, W.relays, W.rbats = D.load_relays()
     C = D.Comms(W.geo, W.nodes, D.load_comm())
-    g1 = build_groups(W, allow_types=("A", "B"))[0]
-    p1 = schedule(W, g1)
-    e1 = evaluate(W, p1)
+    g1, p1, e1 = build_groups(W, allow_types=("A", "B"))
 
     # 问题三的中继站位：直接读 out_q3.json 的**最终 3 站方案**。
     # 不再用 cluster_stations + station_plan 现算——那两个函数的覆盖判据
