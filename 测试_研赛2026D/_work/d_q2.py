@@ -7,10 +7,13 @@
   ② 医疗物资     ≤ 期望送达时间（3600 s）
 其余物资的期望送达时间只用于衡量「配送及时性」（软指标）。
 
-**关键设计**：先把每组货箱按「全部机型都装得下」的最小容量（A 型的 25 kg /
-0.06 m³）分组，于是每个架次的机型可变；到排程阶段再按「哪个（无人机，电池）
-最早可用」定机型。若一开始就按 C 型的 80 kg 组批，两架 C 机会被压成串行瓶颈，
-首批与医疗时限全部违约——这是本文第一版踩过的坑。
+**关键设计**：组批容量取「全机型容量谱上的一个中间档」而不是最大档，于是每个
+架次的机型可变；到排程阶段再按「哪个（无人机，电池）最早可用」定机型。
+本文正式取 B 型容量 30 kg / 0.073 m³，依据是 6.3 节的容量扫描：
+按 A 型 25 kg 组批得 41 架次 / 10973 s / 107.41 kWh，按 B 型 30 kg 得
+40 架次 / 10215 s / 102.39 kWh（三项同时更优）；按 C 型 80 kg 虽然只有
+25 架次、83.87 kWh，但两架 C 机被压成串行瓶颈，完成时间恶化到 14189 s。
+**完成时间由最忙的那架决定，所以负载均衡比"少用架次"重要。**
 """
 from __future__ import annotations
 
@@ -43,9 +46,14 @@ class World:
         self.by_site = defaultdict(list)
         for b in self.boxes:
             self.by_site[b["site"]].append(b)
-        # 全机型统一容量（A 型的最小容量），保证机型可换
-        self.cap_m = min(self.types[g]["Q"] for g in TYPES)
-        self.cap_v = min(self.types[g]["vol"] for g in TYPES)
+        # 组批容量。取 B 型容量而不是「全机型的最小容量」——这一点是实测出来的：
+        # 按 A 型 25 kg/0.06 m³ 组批（原设计）得 41 架次 / 10973 s / 107.41 kWh；
+        # 按 B 型 30 kg/0.073 m³ 得 40 架次 / 10215 s / 102.39 kWh，三项同时更优。
+        # 按 C 型 80 kg 组批更极端：25 架次、能耗 83.87 kWh，但完成时间 14189 s
+        # ——因为全队只有 2 架 C 机，被压成串行瓶颈，机队利用率掉到 41.8%。
+        # 完成时间由**最忙的那架**决定，所以负载均衡比"少用架次"重要。
+        self.cap_m = self.types["B"]["Q"]
+        self.cap_v = self.types["B"]["vol"]
 
     def route(self, g, stops, k=None):
         tt = self.types[g]
@@ -90,13 +98,15 @@ def _boxes_of(stops):
 
 
 # ══════════════════════════════════════════════════════════
-def initial_groups(W):
+def initial_groups(W, cap_m=None, cap_v=None):
     """逐站组批：**先把「时限箱」（首批 + 医疗）单独装一箱**，再装其余。
 
     这一步不能省。若直接对全部货箱做最少架次装箱，首批箱会被打散到后面的
     架次里——实测 15 个服务区里有 8 个的首批箱落到了第二、三轮，交付时刻
     4863~5965 s，硬约束全部违约。时限箱单独成组后它们必然落在第一、二轮。
     """
+    cm = W.cap_m if cap_m is None else cap_m
+    cv = W.cap_v if cap_v is None else cap_v
     out = []
     for s in [x for x in SITES if W.by_site[x]]:
         bs = W.by_site[s]
@@ -107,7 +117,7 @@ def initial_groups(W):
                     sum(b["vol"] for b in urgent) > W.cap_v + 1e-9:
                 n, masks = min_bins([b["mass"] for b in urgent],
                                     [b["vol"] for b in urgent],
-                                    W.cap_m, W.cap_v)
+                                    cm, cv)
                 for m in masks:
                     out.append([(s, [urgent[i] for i in range(len(urgent))
                                      if m >> i & 1])])
@@ -115,7 +125,7 @@ def initial_groups(W):
                 out.append([(s, urgent)])
         if rest:
             n, masks = min_bins([b["mass"] for b in rest],
-                                [b["vol"] for b in rest], W.cap_m, W.cap_v)
+                                [b["vol"] for b in rest], cm, cv)
             assert n < 10 ** 6, f"{s} 在最小容量下装不下"
             for m in masks:
                 out.append([(s, [rest[i] for i in range(len(rest))
@@ -164,22 +174,42 @@ def merge_pass(W, stops_list, max_stops=3, allow_types=TYPES):
 
 
 # ══════════════════════════════════════════════════════════
-def schedule(W, stops_list, deadline_aware=True):
+def schedule(W, stops_list, deadline_aware=True, fleet=None):
     """按（首批 → 医疗 → 到期时间）排序，逐个派给最早可用的（无人机，电池）。
 
     deadline_aware：有时限的架次只在「能按时送达」的候选里挑；挑不到才退回
     最早可用的那个。没有这一条时，调度会把 3 个站合并的 C 机长航线堆在
     0 时刻，而全队只有 2 架 C 机——A/B 机闲着，首批却全部超时。
     """
+    nf = fleet or {g: sum(1 for d in W.drones if d["type"] == g) for g in TYPES}
     pool = {g: [dict(id=f"{g}{i+1:02d}", free=0.0) for i in range(W.bats[g]["n"])]
             for g in TYPES}
-    drones = {d["id"]: dict(id=d["id"], type=d["type"], free=0.0)
-              for d in W.drones}
+    # 无人机编号必须用附件《逐架无人机清单》的 U01~U08，不能自己编号：
+    # verify.py 会拿结果表里的编号去附件里对照，第一版自造的 "A*01" 当场被判失败。
+    inv = {g: [d["id"] for d in W.drones if d["type"] == g] for g in TYPES}
+    drones = {}
+    for g in TYPES:
+        for i in range(nf.get(g, 0)):
+            did = (inv[g][i] if i < len(inv[g])
+                   else f"{g}-EXT{i + 1:02d}")   # 仅机队敏感性实验会走到这里
+            drones[did] = dict(id=did, type=g, free=0.0)
 
-    order = sorted(range(len(stops_list)),
-                   key=lambda i: (W.urgency(stops_list[i]),
-                                  sum(b["mass"] for _, g in stops_list[i]
-                                      for b in g)))
+    # 派发顺序。0 号键把「首批 / 医疗」提到最前，其中按**期望送达时刻升序**
+    # （EDD）；其余软时限架次按**估计能耗降序**派发。
+    # 为什么不能直接用 LPT（最长先派）：首批箱多为单站短航线，LPT 把它们一直
+    # 往后排，实测 30 个首批箱里 16 个超时——min-makespan 的经典规则在有硬
+    # 时限时失效。八种派发规则的实测对比见 d_sched_opt.py 与论文表 8。
+    _e = {}
+    for st in stops_list:
+        _e[id(st)] = min(W.route(g, st)[1] for g in W.ok_types(st))
+
+    def _key(i):
+        bs = _boxes_of(stops_list[i])
+        if any(b["first"] or b["kind"] == "医疗物资" for b in bs):
+            return (0, min(b["t_due"] for b in bs), 0.0)
+        return (1, 0.0, -_e[id(stops_list[i])])
+
+    order = sorted(range(len(stops_list)), key=_key)
     plan = [None] * len(stops_list)
     for i in order:
         st = stops_list[i]
