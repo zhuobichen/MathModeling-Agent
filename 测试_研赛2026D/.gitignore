@@ -1,0 +1,4 @@
+_work/__pycache__/
+_work/*.npz
+_work/*.bak
+_work/logs/
