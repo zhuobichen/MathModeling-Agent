@@ -212,7 +212,7 @@ def repair_grouping(W, allow_types=("A", "B"), max_iter=20, delta=0.0,
     raise RuntimeError("组批修复不收敛")
 
 
-def simulate_order(W, stops_list, order, delta=0.0, fleet=None):
+def simulate_order(W, stops_list, order, delta=0.0, fleet=None, lock=None):
     """按给定派发顺序排程，返回与 schedule() 同构的计划；有硬约束违反则返回 None。
 
     口径与 schedule() 完全一致（最早可用的同型无人机 + 已换好的电池、时限感知、
@@ -237,6 +237,8 @@ def simulate_order(W, stops_list, order, delta=0.0, fleet=None):
         due = min(b["t_due"] for b in bs)
         cand = []
         for g in W.ok_types(st):
+            if lock is not None and lock.get(id(st), g) != g:
+                continue                      # 机型被锁定的架次只走指定机型
             t, E = W.route(g, st)
             for did, d in drones.items():
                 if d["type"] != g:
@@ -275,7 +277,7 @@ def simulate_order(W, stops_list, order, delta=0.0, fleet=None):
 
 
 def optimise_order(W, stops_list, delta=0.0, max_rounds=40, verbose=False,
-                   fleet=None):
+                   fleet=None, lock=None):
     """**在派发顺序空间里做局部搜索**：交换任意两个架次，接受能缩短完成时间的。
 
     为什么需要：结果只取决于派发顺序，而前面只试过 7 个**固定规则**（紧迫度、
@@ -293,7 +295,7 @@ def optimise_order(W, stops_list, delta=0.0, max_rounds=40, verbose=False,
         return (1, 0.0, -e)
 
     cur = sorted(range(len(stops_list)), key=key)
-    p = simulate_order(W, stops_list, cur, delta, fleet)
+    p = simulate_order(W, stops_list, cur, delta, fleet, lock)
     if p is None:
         # 起点顺序就排不出零违反的时间表（换容量档时会遇到）。依次退到别的
         # 固定规则找可行的起点；都不可行就交回 schedule()——它有"候选都不满足
@@ -301,7 +303,7 @@ def optimise_order(W, stops_list, delta=0.0, max_rounds=40, verbose=False,
         for alt in (sorted(range(len(stops_list)),
                            key=lambda i: W.urgency(stops_list[i])),
                     list(range(len(stops_list)))):
-            q = simulate_order(W, stops_list, alt, delta, fleet)
+            q = simulate_order(W, stops_list, alt, delta, fleet, lock)
             if q is not None:
                 cur, p = alt, q
                 break
@@ -315,7 +317,8 @@ def optimise_order(W, stops_list, delta=0.0, max_rounds=40, verbose=False,
             for b in range(a + 1, n):
                 trial = list(cur)
                 trial[a], trial[b] = trial[b], trial[a]
-                q = simulate_order(W, stops_list, trial, delta, fleet)
+                q = simulate_order(W, stops_list, trial, delta, fleet,
+                                   lock)
                 if q is None:
                     continue
                 t = max(x["end"] for x in q)
