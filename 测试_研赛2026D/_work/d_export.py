@@ -18,6 +18,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import d_core as D
+import d_relay
 from d_q1 import sortie as sortie_of, max_payload
 from d_q2 import World, TYPES, SITES, initial_groups, merge_pass, schedule, evaluate
 import d_q3 as Q3
@@ -42,14 +43,16 @@ def main():
     p1 = schedule(W, g1)
     e1 = evaluate(W, p1)
     # ── 问题三：中继 ──
-    demands = []
-    for p in p1:
-        for (t0, t1, smp) in Q3.gaps_of(W, C, p):
-            pt = Q3.pick_point(W, C, smp, Q3.candidate_points(W, C, 20), rt)
-            if pt:
-                demands.append((pt, t0, t1))
-    centers = Q3.cluster_stations(W, demands, 2)
-    stations = Q3.station_plan(W, rt, demands, centers, C)
+    # 直接读 out_q3.json 的最终方案（3 站）。**不要在这里现算**：d_q3 原来的
+    # cluster_stations + station_plan 覆盖判据有高估（d_relay.py 有说明），
+    # 结果文件必须与论文引用的是同一套站位。
+    with open(os.path.join(HERE, "out_q3.json"), encoding="utf-8") as f:
+        q3res = json.load(f)
+    stations = q3res["stations"]
+    centers = [tuple(x["point"]) for x in stations]
+    T_SHIFT = float(q3res.get("t_shift", 0.0))
+    # 中继编号：库存只有 2 架，第 3 个站位没有实体机可用（缺口在论文里写明）
+    relays_avail = [r["id"] for r in W.relays]
     # ── 问题四 ──
     q4 = json.load(open(os.path.join(HERE, "out_q4.json"), encoding="utf-8"))
 
@@ -113,7 +116,8 @@ def main():
     ws3 = wb["Q3_中继架次"]
     for i, x in enumerate(stations, 1):
         ws3.cell(i + 1, 1, f"R{i:03d}")
-        ws3.cell(i + 1, 2, W.relays[i - 1]["id"] if i - 1 < len(W.relays) else "R01")
+        ws3.cell(i + 1, 2, relays_avail[i - 1] if i - 1 < len(relays_avail)
+                 else f"（缺 {i - len(relays_avail)}）")
         ws3.cell(i + 1, 3, f"RE{i:02d}")
         ws3.cell(i + 1, 4, round(x["t_out"], 2))
         ws3.cell(i + 1, 5, round(x["point"][0], 7))
@@ -128,24 +132,23 @@ def main():
     rr = 2
     for i, p in enumerate(psorted, 1):
         for (t0, t1, smp) in Q3.gaps_of(W, C, p):
-            pt = Q3.pick_point(W, C, smp, Q3.candidate_points(W, C, 20), rt)
-            if pt is None:
-                ws3b.cell(rr, 1, f"T{i:03d}")
-                ws3b.cell(rr, 2, "中断")
-                ws3b.cell(rr, 3, round(t0, 2))
-                ws3b.cell(rr, 4, round(t1, 2))
-                ws3b.cell(rr, 5, "无")
-                rr += 1
-                continue
-            j = min(range(len(centers)),
-                    key=lambda k: W.geo.dist(pt[0], pt[1],
-                                             centers[k][0], centers[k][1]))
+            j = None
+            for jj, x2 in enumerate(stations):
+                if d_relay.gap_covered(W, C, smp, tuple(x2["point"])):
+                    j = jj
+                    break
             ws3b.cell(rr, 1, f"T{i:03d}")
-            ws3b.cell(rr, 2, "中继")
-            ws3b.cell(rr, 3, round(t0, 2))
-            ws3b.cell(rr, 4, round(t1, 2))
-            ws3b.cell(rr, 5, "中继无人机")
-            ws3b.cell(rr, 6, f"R{j+1:03d}")
+            if j is None:
+                ws3b.cell(rr, 2, "中断")
+                ws3b.cell(rr, 3, round(t0 + T_SHIFT, 2))
+                ws3b.cell(rr, 4, round(t1 + T_SHIFT, 2))
+                ws3b.cell(rr, 5, "无")
+            else:
+                ws3b.cell(rr, 2, "中继")
+                ws3b.cell(rr, 3, round(t0 + T_SHIFT, 2))
+                ws3b.cell(rr, 4, round(t1 + T_SHIFT, 2))
+                ws3b.cell(rr, 5, "中继无人机")
+                ws3b.cell(rr, 6, f"R{j+1:03d}")
             rr += 1
     print(f"Q3_中继架次：{len(stations)} 行；Q3_通信保障：{rr-2} 行")
 
@@ -193,7 +196,9 @@ def main():
                 q3=dict(n_station=len(stations),
                         E=sum(x["E"] for x in stations),
                         n_bat=sum(x["n_bat"] for x in stations),
-                        n_gap=len(demands),
+                        n_gap=q3res["n_gaps"],
+                        n_relay_min=q3res.get("n_relay_min"),
+                        t_shift=q3res.get("t_shift"),
                         t_joint=max(max(p["end"] for p in p1),
                                     max(x["t_back"] for x in stations))),
                 q4=q4)

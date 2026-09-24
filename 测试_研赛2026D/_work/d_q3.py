@@ -24,6 +24,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import d_core as D
+import d_relay
 from d_q2 import World, TYPES, SITES, initial_groups, merge_pass, schedule, evaluate
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -270,47 +271,77 @@ def main():
 
     print()
     print("=" * 78)
-    print("第二步：中继悬停点")
+    print("第二步：中继悬停点（按**无人机的真实位置**判链路）")
     print("=" * 78)
     cands = candidate_points(W, C, n_side=20)
     print(f"  候选悬停点 {len(cands)} 个（每约 1 km 格子的最高点，离地 {HOVER_AGL:.0f} m）")
-    demands, picked = [], 0
-    for (k, t0, t1, smp, p) in all_gaps:
-        pt = pick_point(W, C, smp, cands, rt)
-        if pt is None:
-            print(f"    ✗ 架次{k} 时段 {t0:.0f}-{t1:.0f} 未找到覆盖点")
-            continue
-        picked += 1
-        demands.append((pt, t0, t1))
-    print(f"  覆盖 {picked}/{len(all_gaps)} 个缺口时段")
+    print("  判据：缺口的**每个采样点**都要能被同一个站位建立 U→Ra→G01；")
+    print("        拿缺口自己的悬停点当无人机位置去判会高估覆盖（见 d_relay.py）")
+
+    smps = [g[3] for g in all_gaps]
+    masks = d_relay.cover_masks(W, C, smps, cands)
+    sel, cov, hist = d_relay.select_stations(masks, len(all_gaps))
+    print(f"  站位选择：k=1 覆盖 {hist[0]}，"
+          + "，".join(f"k={k+1} 覆盖 {h}" for k, h in enumerate(hist[1:], 1))
+          + f"（缺口共 {len(all_gaps)}）")
+    if bin(cov).count("1") < len(all_gaps):
+        raise RuntimeError(f"候选点不足以全覆盖，缺 {len(all_gaps) - bin(cov).count('1')} 个")
+    KMIN = len(sel)
+    print(f"  → 全覆盖所需最少站位 **{KMIN} 个**"
+          f"（k={KMIN-1} 那一档是穷举的，可以排除）")
+
+    # 同站数下换成更省电的组合：逐个站位试替换（覆盖必须仍是全覆盖）
+    def evalsel(idx):
+        pts = [cands[i] for i in idx]
+        ms = [masks[i] for i in idx]
+        a, unc = d_relay.assign_gaps(ms, len(all_gaps))
+        if unc:
+            return None, None
+        pl = d_relay.plan(W, rt, all_gaps, pts, a)
+        return sum(x["E"] for x in pl), pl
+
+    bestE, bestpl = evalsel(sel)
+    top = sorted(range(len(cands)), key=lambda i: -bin(masks[i]).count("1"))[:40]
+    improved = 0
+    for pos in range(len(sel)):
+        for c in top:
+            if c in sel:
+                continue
+            trial = list(sel)
+            trial[pos] = c
+            E2, pl2 = evalsel(trial)
+            if E2 is not None and E2 < bestE - 1e-9:
+                sel, bestE, bestpl, improved = trial, E2, pl2, improved + 1
+    print(f"  同站数下的省电替换：{improved} 次成功，中继能耗 {bestE:.3f} kWh")
 
     # ── 中继必须先到点：算出运输需要整体推迟多少才来得及 ──
-    delta = 0.0
-    for (pt, t0, t1) in demands:
-        tf = relay_flight(W, rt, pt)[0]
-        delta = max(delta, rt["t_prep"] + tf - t0)
-    delta = max(delta, 0.0)
+    delta = max([0.0] + [x["t_out"] - min(g[0] for g in all_gaps
+                                          if True) for x in bestpl])
+    delta = max([0.0] + [rt["t_prep"] + relay_flight(W, rt, x["point"])[0]
+                         - min(g[0] for g in all_gaps) for x in bestpl])
     if delta > 0:
         print(f"  中继到场最早需 {rt['t_prep']:.0f}s(准备) + 飞行；"
-              f"为保证运输全程有链路，运输整体推迟 {delta:.0f}s 起飞"
-              f"（中继先到点）")
+              f"为保证运输全程有链路，运输整体推迟 {delta:.0f}s 起飞")
         for pp in p1:
             pp["start"] += delta
             pp["end"] += delta
             pp["deliv"] = {k: v + delta for k, v in pp["deliv"].items()}
-        all_gaps2 = []
+        # 推迟后缺口时刻变了，站位与覆盖要重算一轮
+        all_gaps = []
         for k2, pp in enumerate(p1):
             for (g0, g1, smp) in gaps_of(W, C, pp):
-                all_gaps2.append((g0, g1, smp))
-        demands = []
-        for (g0, g1, smp) in all_gaps2:
-            pt = pick_point(W, C, smp, cands, rt)
-            if pt is not None:
-                demands.append((pt, g0, g1))
+                all_gaps.append((k2, g0, g1, smp, pp))
+        smps = [g[3] for g in all_gaps]
+        masks = d_relay.cover_masks(W, C, smps, cands)
+        sel, cov, hist = d_relay.select_stations(masks, len(all_gaps),
+                                                 verbose=False)
+        if bin(cov).count("1") < len(all_gaps):
+            raise RuntimeError("推迟后覆盖不足")
+        bestE, bestpl = evalsel(sel)
         e1 = evaluate(W, p1)
-        print(f"  推迟后：完成 {e1['t_done']:.0f}s，首批违约 "
+        print(f"  推迟后重算：完成 {e1['t_done']:.0f}s，首批违约 "
               f"{e1['viol_first']}，医疗违约 {e1['viol_med']}，"
-              f"缺口时段 {len(demands)}")
+              f"站位 {len(sel)} 个，中继能耗 {bestE:.3f} kWh")
 
     print()
     print("=" * 78)
@@ -318,30 +349,35 @@ def main():
     print("=" * 78)
     print("  各站位：只用一个悬停点、在覆盖窗口内持续驻留；"
           "能源组件不足时按需换电")
+    assign, _uncov = d_relay.assign_gaps([masks[i] for i in sel], len(all_gaps))
     sweep = {}
-    best_plan = None
-    for nr in (1, 2, 3, 4):
-        centers = cluster_stations(W, demands, nr)
-        st = station_plan(W, rt, demands, centers, C)
-        E = sum(x["E"] for x in st)
-        nbat = sum(x["n_bat"] for x in st)
+    for k in range(1, len(sel) + 1):
+        a, unc = d_relay.assign_gaps([masks[i] for i in sel[:k]], len(all_gaps))
+        pl = d_relay.plan(W, rt, all_gaps, [cands[i] for i in sel[:k]], a)
+        E = sum(x["E"] for x in pl)
+        nbat = sum(x["n_bat"] for x in pl)
         t_joint = max(max(p["end"] for p in p1),
-                      max([x["t_back"] for x in st] or [0]))
-        ncov = sum(x["n_cover"] for x in st)
-        sweep[nr] = dict(n_station=len(st), E=E, n_bat=nbat, t_joint=t_joint,
-                         hover=sum(x["hover"] for x in st),
-                         n_gap=sum(x["n_gap"] for x in st), n_cover=ncov)
-        print(f"  {nr} 站：覆盖 {ncov}/{len(demands)} 个缺口 | "
-              f"驻留窗口合计 {sum(x['hover'] for x in st):>6.0f}s | "
+                      max([x["t_back"] for x in pl] or [0]))
+        sweep[str(k)] = dict(n_station=len(pl), E=E, n_bat=nbat,
+                             t_joint=t_joint,
+                             hover=sum(x["hover"] for x in pl),
+                             n_gap=len(all_gaps),
+                             n_cover=len(all_gaps) - len(unc))
+        print(f"  {k} 站：覆盖 {len(all_gaps)-len(unc)}/{len(all_gaps)} 个缺口 | "
+              f"驻留窗口合计 {sum(x['hover'] for x in pl):>6.0f}s | "
               f"中继能耗 {E:>6.3f} kWh | 需能源组件 {nbat} 个（库 6） | "
               f"联合完成 {t_joint:>6.0f}s")
-        # 只在**全覆盖**的方案里选能耗最低的；覆盖不全的方案再便宜也不能用
-        if ncov == len(demands) and (best_plan is None or E < best_plan[0]):
-            best_plan = (E, nr, st, centers)
-    if best_plan is None:
-        raise RuntimeError("现有中继数量下无法全覆盖")
-    E, nr, st, centers = best_plan
-    print(f"  → 取 {nr} 站方案（全覆盖中能耗最低）")
+    st = bestpl
+    print(f"  → 取 {len(sel)} 站方案（全覆盖且经同站数省电替换）")
+
+    # 需要几架中继：缺口是区间任务，最少中继数 = 最大并发站数
+    integ = [[(all_gaps[i][1], all_gaps[i][2]) for i, a in enumerate(assign)
+              if a == x["station"]] for x in st]
+    nrelay, tpk, nper = d_relay.min_relays(integ)
+    print(f"  中继架数：各站缺口区间数 {nper}；**最大并发 {nrelay} 个站**"
+          f"（峰值时刻 {tpk:.0f}s）→ 至少需 {nrelay} 架中继（库存 2）")
+    if nrelay > 2:
+        print(f"    ⚠ 库存只有 2 架中继 → **问题三本身就缺 {nrelay - 2} 架**")
     print()
     print(f"{'站':>3}{'缺口':>6}{'覆盖':>6}{'覆盖窗口/s':>18}{'驻留/s':>9}"
           f"{'能耗/kWh':>10}{'组件':>5}   悬停点 (经,纬,海拔)")
@@ -353,14 +389,18 @@ def main():
               f"({x['point'][0]:.4f},{x['point'][1]:.4f},{x['point'][2]:.0f})")
 
     res = dict(n_sorties=len(p1), n_gaps=len(all_gaps), bad_pts=bad_pts,
-               tot_pts=tot_pts, coverage=picked / max(len(all_gaps), 1),
+               tot_pts=tot_pts, coverage=1.0,
                relay=[dict(station=x["station"], lon=x["point"][0],
                            lat=x["point"][1], alt=x["point"][2],
                            t_out=x["t_out"], t_back=x["t_back"],
                            win=list(x["win"]), hover=x["hover"],
                            E=x["E"], n_bat=x["n_bat"], n_gap=x["n_gap"],
                            n_cover=x["n_cover"]) for x in st],
-               relay_E=E, uncovered=len(demands)-sum(x["n_cover"] for x in st),
+               relay_E=sum(x["E"] for x in st), uncovered=0,
+               n_station_min=len(sel), cover_hist=hist,
+               t_shift=float(delta), n_relay_min=int(nrelay),
+               relay_concurrency_peak=float(tpk),
+               gaps_per_station=[int(v) for v in nper],
                t_joint=max(max(p["end"] for p in p1),
                            max([x["t_back"] for x in st] or [0])),
                t_transport=e1["t_done"], transport_E=e1["E"],
@@ -368,7 +408,7 @@ def main():
                stations=st)
     with open(os.path.join(HERE, "out_q3.json"), "w", encoding="utf-8") as f:
         json.dump(res, f, ensure_ascii=False, indent=1, default=float)
-    print("\n已写出 out_q3.json")
+    print("已写出 out_q3.json")
     return res
 
 

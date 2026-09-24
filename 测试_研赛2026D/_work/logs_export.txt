@@ -1,6 +1,6 @@
 Q1_单点组批：18 行
 Q2_运输架次：40 行；Q2_逐箱交付：80 行
-Q3_中继架次：2 行；Q3_通信保障：64 行
+Q3_中继架次：3 行；Q3_通信保障：64 行
 Q4_分区配置：5 行
 已写出 D:\github_project\ZhaoWen_GitHub维护\MathModeling-Agent\测试_研赛2026D\_交付\结果提交表.xlsx
 已写出 out_summary.json

@@ -27,6 +27,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import d_core as D
+import d_relay
 from d_q2 import World, TYPES, SITES, initial_groups, merge_pass, schedule, evaluate
 import d_q3 as Q3
 
@@ -280,7 +281,7 @@ def all_caps(inv=INV["drone"]):
     return out
 
 
-def best_allocation(W, subs, verbose=False):
+def best_allocation(W, subs, verbose=False, t_shift=0.0):
     """**库存约束下的最优分配**：把库存按机型分给各组，使硬时限违反数最少。
 
     $$\min \sum_j \mathrm{Viol}_j(\mathbf n_j)\quad
@@ -321,8 +322,8 @@ def best_allocation(W, subs, verbose=False):
     for j, (i, r) in enumerate(zip(combo, res)):
         cp = caps[i]
         bc, r2 = min_batteries(W, subs[j], cp, t_ref=r["t_done"])
-        per.append(dict(cap=cp, viol=r2["viol"], t=r2["t_done"], E=r2["E"],
-                        bat=bc, t_full=r["t_done"]))
+        per.append(dict(cap=cp, viol=r2["viol"], t=r2["t_done"] + t_shift,
+                        E=r2["E"], bat=bc, t_full=r["t_done"] + t_shift))
     bat_tot = {g: sum(p["bat"][g] for p in per) for g in TYPES}
     tmax = max(p["t"] for p in per)          # 最终配置下的最晚组完成时刻
     out = dict(alloc=tot, viol=viol, tmax=tmax, n_eval=n_eval,
@@ -352,15 +353,19 @@ def main():
     p1 = schedule(W, g1)
     e1 = evaluate(W, p1)
 
-    # 问题三的中继站位（2 站，全覆盖）
-    demands = []
-    for p in p1:
-        for (t0, t1, smp) in Q3.gaps_of(W, C, p):
-            pt = Q3.pick_point(W, C, smp, Q3.candidate_points(W, C, 20), rt)
-            if pt:
-                demands.append((pt, t0, t1))
-    centers = Q3.cluster_stations(W, demands, 2)
-    st = Q3.station_plan(W, rt, demands, centers, C)
+    # 问题三的中继站位：直接读 out_q3.json 的**最终 3 站方案**。
+    # 不再用 cluster_stations + station_plan 现算——那两个函数的覆盖判据
+    # 有高估（拿缺口自己的悬停点当无人机位置判链路，见 d_relay.py），
+    # 现在以 d_relay 的站位选择为准，问题四必须与问题三同一套站位。
+    with open(os.path.join(HERE, "out_q3.json"), encoding="utf-8") as f:
+        q3res = json.load(f)
+    st = q3res["stations"]
+    centers = [tuple(x["point"]) for x in st]
+    # 问题三要求中继先到点，运输因此整体推迟 t_shift 秒；问题四以问题三方案
+    # 为基础，各组同样受这一条约束，故每组的完成时刻都要加上这个推迟量。
+    T_SHIFT = float(q3res.get("t_shift", 0.0))
+    print(f"  问题三的中继站位 {len(st)} 个（读自 out_q3.json）；"
+          f"中继先到点导致的运输推迟 {T_SHIFT:.0f}s（各组继承）")
     # 每个站位服务哪些服务区（按覆盖的缺口归属）
     def stations_for_site(s):
         out = set()
@@ -383,6 +388,8 @@ def main():
     print(f"  运输 {len(p1)} 架次 / 能耗 {e1['E']:.2f} kWh / 完成 {e1['t_done']:.0f}s"
           f"；中继 {len(st)} 站 / 能耗 {sum(x['E'] for x in st):.2f} kWh / "
           f"能源组件 {sum(x['n_bat'] for x in st)} 组")
+    print(f"  （中继站位数由 d_relay 的修正判据给出：k=2 穷举证明只能覆盖 58/64，"
+          f"故需 {len(st)} 站）")
     print(f"  实际使用：运输机 "
           f"{ {g: sum(1 for p in p1 if p['g'] == g) for g in TYPES} }（按机型计架次）")
 
@@ -414,7 +421,7 @@ def main():
             print(f"    组{i2+1}（{len(gp)} 站）：{len(sub):>2} 架次 | "
                   f"能耗 {EE:>7.2f} kWh | 最小机队 {n_min} 架 "
                   f"{ {g: nf[g] for g in TYPES if nf[g]} }")
-        # 中继：按「站位覆盖的缺口属于哪一组」分配
+        # 中继：按「哪个站位覆盖了这一组的缺口」分配（判据与 d_relay 一致）
         s2st = defaultdict(set)
         for k2, p2 in enumerate(p1):
             gidx = {gid[x] for x, _ in p2["stops"]}
@@ -422,13 +429,10 @@ def main():
                 continue
             gi = gidx.pop()
             for (g0, g1_, smp) in Q3.gaps_of(W, C, p2):
-                pt = Q3.pick_point(W, C, smp, Q3.candidate_points(W, C, 20), rt)
-                if pt is None:
-                    continue
-                j2 = min(range(len(centers)),
-                         key=lambda jj: W.geo.dist(pt[0], pt[1],
-                                                  centers[jj][0], centers[jj][1]))
-                s2st[gi].add(j2)
+                for j2, x2 in enumerate(st):
+                    if d_relay.gap_covered(W, C, smp, tuple(x2["point"])):
+                        s2st[gi].add(j2)
+                        break
         rel_per = {i2: len(v) for i2, v in s2st.items()}
         # 各组需要的能源组件数 = 该组分到的那些站位的组件数之和
         rel_mod = {i2: int(sum(st[j]["n_bat"] for j in v))
@@ -450,7 +454,7 @@ def main():
         # 库存约束下的最优分配（把库存按机型分给各组，而不是"每组自备峰值机队"）
         subs = [[st for st in g1 if all(gid[x] == i2 for x, _ in st)]
                 for i2 in range(len(groups))]
-        alloc = best_allocation(W, subs, verbose=True)
+        alloc = best_allocation(W, subs, verbose=True, t_shift=T_SHIFT)
         print(f"    对照·每组按单一机型自备峰值机队：合计 "
               f"{ {g: need_d[g] for g in TYPES} }"
               f"（这才是原先那句「缺 3 架 B 型」的来源，是建模口径造成的假缺口）")
