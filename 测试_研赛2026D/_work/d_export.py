@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import d_core as D
 import d_relay
 from d_q1 import sortie as sortie_of, max_payload
-from d_q2 import World, TYPES, SITES, initial_groups, merge_pass, schedule, evaluate
+from d_q2 import build_groups, World, TYPES, SITES, initial_groups, merge_pass, schedule, evaluate
 import d_q3 as Q3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,7 +39,7 @@ def main():
     # ── 问题一 ──
     q1 = json.load(open(os.path.join(HERE, "out_q1.json"), encoding="utf-8"))
     # ── 问题二 ──
-    g1 = merge_pass(W, initial_groups(W), allow_types=("A", "B"))
+    g1 = build_groups(W, allow_types=("A", "B"))[0]
     p1 = schedule(W, g1)
     e1 = evaluate(W, p1)
     # ── 问题三：中继 ──

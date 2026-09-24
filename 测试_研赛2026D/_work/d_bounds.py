@@ -26,15 +26,14 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import d_core as D
-from d_q2 import World, TYPES, SITES, initial_groups, merge_pass, schedule, evaluate
+from d_q2 import build_groups, World, TYPES, SITES, merge_pass, schedule, evaluate
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def main():
     W = World()
-    g0 = initial_groups(W)
-    g1 = merge_pass(W, g0, allow_types=("A",))
+    g1 = build_groups(W, allow_types=("A", "B"))[0]
     plan = schedule(W, g1)
     ev = evaluate(W, plan)
 

@@ -21,6 +21,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import d_core as D
+from d_q2 import build_groups
 from d_q2 import (World, TYPES, initial_groups, merge_pass, schedule, evaluate,
                   _boxes_of)
 
@@ -74,7 +75,7 @@ def schedule_forced(W, stops_list, g, n):
 
 def main():
     W = World()
-    stops = merge_pass(W, initial_groups(W), allow_types=("A", "B"))
+    stops = build_groups(W, allow_types=("A", "B"))[0]
     p = schedule(W, stops)
     ev = evaluate(W, p)
     print("=" * 78)

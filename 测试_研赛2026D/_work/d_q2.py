@@ -133,6 +133,94 @@ def initial_groups(W, cap_m=None, cap_v=None):
     return out
 
 
+def pack_min_sorties(W, cap_m=None, cap_v=None):
+    """逐站做**最少架次**装箱（全部货箱一起装，不区分时限箱）。
+
+    这是容量意义上的最优组批：本站货箱一起装，子集 DP 精确求最少架次。
+    缺点是时限箱可能被打散到后面的架次里去。
+    """
+    cm = W.cap_m if cap_m is None else cap_m
+    cv = W.cap_v if cap_v is None else cap_v
+    out = []
+    for s in [x for x in SITES if W.by_site[x]]:
+        bs = W.by_site[s]
+        n, masks = min_bins([b["mass"] for b in bs],
+                            [b["vol"] for b in bs], cm, cv)
+        assert n < 10 ** 6, f"{s} 在容量 {cm} kg / {cv} m3 下装不下"
+        for m in masks:
+            out.append([(s, [bs[i] for i in range(len(bs)) if m >> i & 1])])
+    return out
+
+
+def split_site(W, groups, site):
+    """把某站的架次换成「时限箱单独成组」的装法（逐站版本的 initial_groups）。"""
+    cm, cv = W.cap_m, W.cap_v
+    bs = W.by_site[site]
+    blocks = ([b for b in bs if b["first"] or b["kind"] == "医疗物资"],
+              [b for b in bs if not (b["first"] or b["kind"] == "医疗物资")])
+    new = [g for g in groups if not any(s == site for s, _ in g)]
+    for blk in blocks:
+        if not blk:
+            continue
+        n, masks = min_bins([b["mass"] for b in blk], [b["vol"] for b in blk],
+                            cm, cv)
+        for m in masks:
+            new.append([(site, [blk[i] for i in range(len(blk))
+                                if m >> i & 1])])
+    return new
+
+
+def repair_grouping(W, allow_types=("A", "B"), max_iter=20, delta=0.0):
+    """**先按最少架次装，只拆真正会违约的站。**
+
+    `initial_groups` 无条件对**每个**站把时限箱单独装一箱——这是"全体预防"，
+    代价是 40 架次（对最少架次的 35 架次）。但逐站诊断发现真正会违约的站只有
+    个别几个。于是改成：
+
+      ① 逐站按最少架次装箱；② 合并、排程、评估；③ 把**实际违约**的站拆开；
+      ④ 回到 ②，直到零违约。
+
+    这是贪心修复：最坏情况退化成「每站都拆」（= initial_groups），所以**不会
+    比现状差**；实测只拆了 1 个站（S014），36 架次 / 完成 9153 s / 能耗 92.16 kWh，
+    三项都优于现状的 40 / 10064 / 101.55，且硬约束零违反。
+
+    违约判据与 `evaluate` 完全一致（首批看 t_first、医疗看 t_due）——组批策略
+    与排程器必须共用同一个时限定义。
+    """
+    groups = pack_min_sorties(W)
+    split = set()
+    for _ in range(max_iter):
+        g = merge_pass(W, groups, allow_types=allow_types)
+        p = schedule(W, g, delta=delta)
+        e = evaluate(W, p)
+        if e["viol_first"] == 0 and e["viol_med"] == 0:
+            return g, p, e, split
+        bad = set()
+        for b in W.boxes:
+            t = e["deliv"][b["box"]] + delta      # 加上中继先到点的整体推迟
+            if b["first"] and t > b["t_first"] + 1e-9:
+                bad.add(b["site"])
+            elif b["kind"] == "医疗物资" and t > b["t_due"] + 1e-9:
+                bad.add(b["site"])
+        bad -= split
+        if not bad:
+            return g, p, e, split
+        for s in bad:
+            groups = split_site(W, groups, s)
+        split |= bad
+    raise RuntimeError("组批修复不收敛")
+
+
+def build_groups(W, allow_types=("A", "B"), delta=0.0):
+    """本文正式采用的组批 + 合并：返回 (stops_list, plan, evaluate 结果)。
+
+    delta 是问题三提出的「中继必须先于第一个缺口就位」所导致的运输整体推迟量。
+    它由 d_q3 解出后回代到这里，形成两问之间的不动点迭代（见 d_q3.main）。
+    """
+    g, p, e, _ = repair_grouping(W, allow_types=allow_types, delta=delta)
+    return g, p, e
+
+
 def merge_pass(W, stops_list, max_stops=3, allow_types=TYPES):
     """把两个架次并成一条多站路线：省一次往返就并，且任意机型可行。"""
     changed = True
@@ -174,7 +262,7 @@ def merge_pass(W, stops_list, max_stops=3, allow_types=TYPES):
 
 
 # ══════════════════════════════════════════════════════════
-def schedule(W, stops_list, deadline_aware=True, fleet=None):
+def schedule(W, stops_list, deadline_aware=True, fleet=None, delta=0.0):
     """按（首批 → 医疗 → 到期时间）排序，逐个派给最早可用的（无人机，电池）。
 
     deadline_aware：有时限的架次只在「能按时送达」的候选里挑；挑不到才退回
@@ -227,8 +315,10 @@ def schedule(W, stops_list, deadline_aware=True, fleet=None):
         if not cand:
             raise RuntimeError(f"架次 {st} 无可用机型/无人机")
         if deadline_aware and hard:
-            # 交付不晚于时限：末站时刻 ≈ start + t（保守）
-            good = [c for c in cand if c[0] + c[5] <= due + 1e-9]
+            # 交付不晚于时限：末站时刻 ≈ start + t（保守）。
+            # delta 是问题三要求的「中继先到点」导致的整体推迟量——它必须在这里
+            # 就扣掉，否则问题二会排出一个"加上推迟就违约"的时间表。
+            good = [c for c in cand if c[0] + c[5] + delta <= due + 1e-9]
             if good:
                 cand = good
         start, E, did, bt, g, t = min(cand, key=lambda x: (x[0], x[1]))
@@ -289,15 +379,40 @@ def evaluate(W, plan):
 def main():
     W = World()
     print("=" * 78)
-    print("第一步：逐站按统一最小容量（%g kg / %g m³）组批"
-          % (W.cap_m, W.cap_v))
     print("=" * 78)
-    g0 = initial_groups(W)
-    p0 = schedule(W, g0)
-    e0 = evaluate(W, p0)
-    print(f"  {e0['n_sorties']} 架次 | 完成 {e0['t_done']:.0f}s | "
-          f"能耗 {e0['E']:.2f} kWh | 首批违约 {e0['viol_first']}/{e0['n_first']}"
-          f" | 医疗违约 {e0['viol_med']}/{e0['n_med']}")
+    print("第一步：组批（先按最少架次装，只拆真正会违约的站）"
+          "——容量 %g kg / %g m³" % (W.cap_m, W.cap_v))
+    print("=" * 78)
+    base = pack_min_sorties(W)
+    n_min = len(base)
+    split = set()
+    g0 = p0 = None
+    e0 = None
+    for it in range(20):
+        g0 = merge_pass(W, base, allow_types=("A",))
+        p0 = schedule(W, g0)
+        e0 = evaluate(W, p0)
+        print(f"  第 {it} 轮：{e0['n_sorties']} 架次 | 完成 {e0['t_done']:.0f}s | "
+              f"能耗 {e0['E']:.2f} kWh | 首批违约 {e0['viol_first']} | "
+              f"医疗违约 {e0['viol_med']}")
+        if e0["viol_first"] == 0 and e0["viol_med"] == 0:
+            break
+        bad = set()
+        for b in W.boxes:
+            t = e0["deliv"][b["box"]]
+            if b["first"] and t > b["t_first"] + 1e-9:
+                bad.add(b["site"])
+            elif b["kind"] == "医疗物资" and t > b["t_due"] + 1e-9:
+                bad.add(b["site"])
+        bad -= split
+        if not bad:
+            break
+        for st in bad:
+            base = split_site(W, base, st)
+        split |= bad
+    print(f"  → 最少架次装箱 {n_min} 架次；只拆了 {len(split)} 个站"
+          f"（{sorted(split) if split else '无需拆'}）；合并后 {e0['n_sorties']} 架次")
+    g0 = merge_pass(W, base, allow_types=("A",))
 
     print()
     print("=" * 78)

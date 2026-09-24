@@ -16,7 +16,7 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from d_q2 import (World, TYPES, initial_groups, merge_pass, schedule, evaluate)
+from d_q2 import (build_groups, World, TYPES, merge_pass, schedule, evaluate)
 from d_sched_opt import schedule_ordered
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,7 +63,7 @@ def main():
     for name, cm, cv in CAPS:
         W = World()
         W.cap_m, W.cap_v = cm, cv
-        g = merge_pass(W, initial_groups(W), allow_types=("A", "B"))
+        g = build_groups(W, allow_types=("A", "B"))[0]
         p = schedule(W, g)
         e = evaluate(W, p)
         u = util(p, e, stock(W))
@@ -83,7 +83,7 @@ def main():
     print(f"{'顺序':<32}{'架次':>6}{'完成/s':>9}{'能耗/kWh':>10}"
           f"{'首批违约':>9}{'医疗违约':>9}")
     W = World()
-    g1 = merge_pass(W, initial_groups(W), allow_types=("A",))
+    g1 = build_groups(W, allow_types=("A", "B"))[0]
     rows = []
     for name, key in ORDERS:
         p = schedule_ordered(W, g1, key)
@@ -104,7 +104,7 @@ def main():
     base = None
     for name, fl in FLEETS:
         W = World()
-        g = merge_pass(W, initial_groups(W), allow_types=("A",))
+        g = build_groups(W, allow_types=("A", "B"))[0]
         p = schedule(W, g, fleet=fl)
         e = evaluate(W, p)
         u = util(p, e, fl)

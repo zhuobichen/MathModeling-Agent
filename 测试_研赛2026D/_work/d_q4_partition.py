@@ -37,7 +37,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import d_core as D
-from d_q2 import World, TYPES, SITES, initial_groups, merge_pass, schedule, evaluate
+from d_q2 import build_groups, World, TYPES, SITES, initial_groups, merge_pass, schedule, evaluate
 import d_q3 as Q3
 import d_q4 as Q4
 import d_relay
@@ -135,7 +135,7 @@ def main():
     W = World()
     rt, W.relays, W.rbats = D.load_relays()
     C = D.Comms(W.geo, W.nodes, D.load_comm())
-    g1 = merge_pass(W, initial_groups(W), allow_types=("A", "B"))
+    g1 = build_groups(W, allow_types=("A", "B"))[0]
     p1 = schedule(W, g1)
     p1_stub = p1
     with open(os.path.join(HERE, "out_q3.json"), encoding="utf-8") as f:

@@ -1,0 +1,5 @@
+fig_d1 ok
+fig_d2 ok
+fig_d3 ok
+fig_d4 ok
+图已保存到 D:\github_project\ZhaoWen_GitHub维护\MathModeling-Agent\测试_研赛2026D\_交付\figures ['fig_d1.png', 'fig_d2.png', 'fig_d3.png', 'fig_d4.png']

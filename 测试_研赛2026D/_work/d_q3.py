@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import d_core as D
 import d_relay
-from d_q2 import World, TYPES, SITES, initial_groups, merge_pass, schedule, evaluate
+from d_q2 import build_groups, World, TYPES, SITES, initial_groups, merge_pass, schedule, evaluate
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STEP = 10.0
@@ -247,14 +247,14 @@ def station_plan(W, rt, demands, centers, C=None):
     return out
 
 
-def main():
-    W = World()
-    rt, W.relays, W.rbats = D.load_relays()
-    C = D.Comms(W.geo, W.nodes, D.load_comm())
+def solve(W, C, rt, delta):
+    """给定「运输整体推迟量 δ」，解问题三（站位选择 + 中继驻留），返回方案与所需的 δ。
 
-    g1 = merge_pass(W, initial_groups(W), allow_types=("A", "B"))
-    p1 = schedule(W, g1)
-    e1 = evaluate(W, p1)
+    δ 与站位互为因果：δ 由"中继最晚何时能到点"决定，而站位又由运输轨迹决定，
+    运输轨迹又受 δ 影响（δ 会挤掉时限余量，改变可用的组批）。所以两者要联立。
+    本函数只解一层，外层 `main` 做单调不动点迭代。
+    """
+    g1, p1, e1 = build_groups(W, allow_types=("A", "B"), delta=delta)
 
     print("=" * 78)
     print("第一步：直连链路的缺口")
@@ -314,34 +314,15 @@ def main():
                 sel, bestE, bestpl, improved = trial, E2, pl2, improved + 1
     print(f"  同站数下的省电替换：{improved} 次成功，中继能耗 {bestE:.3f} kWh")
 
-    # ── 中继必须先到点：算出运输需要整体推迟多少才来得及 ──
-    delta = max([0.0] + [x["t_out"] - min(g[0] for g in all_gaps
-                                          if True) for x in bestpl])
-    delta = max([0.0] + [rt["t_prep"] + relay_flight(W, rt, x["point"])[0]
-                         - min(g[0] for g in all_gaps) for x in bestpl])
-    if delta > 0:
-        print(f"  中继到场最早需 {rt['t_prep']:.0f}s(准备) + 飞行；"
-              f"为保证运输全程有链路，运输整体推迟 {delta:.0f}s 起飞")
-        for pp in p1:
-            pp["start"] += delta
-            pp["end"] += delta
-            pp["deliv"] = {k: v + delta for k, v in pp["deliv"].items()}
-        # 推迟后缺口时刻变了，站位与覆盖要重算一轮
-        all_gaps = []
-        for k2, pp in enumerate(p1):
-            for (g0, g1, smp) in gaps_of(W, C, pp):
-                all_gaps.append((k2, g0, g1, smp, pp))
-        smps = [g[3] for g in all_gaps]
-        masks = d_relay.cover_masks(W, C, smps, cands)
-        sel, cov, hist = d_relay.select_stations(masks, len(all_gaps),
-                                                 verbose=False)
-        if bin(cov).count("1") < len(all_gaps):
-            raise RuntimeError("推迟后覆盖不足")
-        bestE, bestpl = evalsel(sel)
-        e1 = evaluate(W, p1)
-        print(f"  推迟后重算：完成 {e1['t_done']:.0f}s，首批违约 "
-              f"{e1['viol_first']}，医疗违约 {e1['viol_med']}，"
-              f"站位 {len(sel)} 个，中继能耗 {bestE:.3f} kWh")
+    # ── 中继必须先到点：运输整体推迟 δ 才来得及 ──
+    # δ = max(0, max_站 (准备 + 飞往该站的时间) − 第一个缺口出现的时刻)
+    # **不在这里就地平移 p1**：δ 会挤掉时限余量、进而改变可用的组批，
+    # 所以把 δ 交回给上层，让它带着新的 δ 重解问题二（见 main 的不动点迭代）。
+    first_gap = min(g[1] for g in all_gaps)
+    delta_need = max([0.0] + [rt["t_prep"] + relay_flight(W, rt, x["point"])[0]
+                              - first_gap for x in bestpl])
+    print(f"  中继到场最早需 {rt['t_prep']:.0f}s(准备) + 飞行；最早缺口在 "
+          f"{first_gap:.0f}s → **需要运输整体推迟 δ = {delta_need:.0f}s**")
 
     print()
     print("=" * 78)
@@ -398,14 +379,45 @@ def main():
                            n_cover=x["n_cover"]) for x in st],
                relay_E=sum(x["E"] for x in st), uncovered=0,
                n_station_min=len(sel), cover_hist=hist,
-               t_shift=float(delta), n_relay_min=int(nrelay),
+               t_shift=float(delta_need), n_relay_min=int(nrelay),
                relay_concurrency_peak=float(tpk),
                gaps_per_station=[int(v) for v in nper],
-               t_joint=max(max(p["end"] for p in p1),
+               t_joint=max(e1["t_done"] + delta_need,
                            max([x["t_back"] for x in st] or [0])),
                t_transport=e1["t_done"], transport_E=e1["E"],
                transport_sorties=len(p1), sweep=sweep,
                stations=st)
+    return res, delta_need
+
+
+def main():
+    """**问题二与问题三的不动点迭代。**
+
+    问题三要求中继先于第一个缺口就位，这给运输加了一个整体推迟 δ；而 δ 会挤掉
+    时限余量，可能让本来合格的组批变成违约——于是问题二的时间表要重排。两者
+    互为输入，本文用单调不动点迭代解：
+
+        δ ← 0；重复：重解问题二(δ) → 选站位 → 求所需 δ'；若 δ' ≤ δ 则收敛，
+        否则 δ ← δ'。
+
+    δ 单调不减、且有上界（中继最晚到点时间），所以迭代必然终止。
+    """
+    W = World()
+    rt, W.relays, W.rbats = D.load_relays()
+    C = D.Comms(W.geo, W.nodes, D.load_comm())
+    delta = 0.0
+    for it in range(5):
+        print()
+        print("=" * 78)
+        print(f"不动点迭代 第 {it} 轮：运输推迟 δ = {delta:.0f}s")
+        print("=" * 78)
+        res, d_new = solve(W, C, rt, delta)
+        if d_new <= delta + 1e-6:
+            print(f"  → 收敛：所需 δ' = {d_new:.0f}s ≤ δ = {delta:.0f}s")
+            break
+        delta = d_new
+    else:
+        print("  ⚠ 未在 5 轮内收敛，取当前解")
     with open(os.path.join(HERE, "out_q3.json"), "w", encoding="utf-8") as f:
         json.dump(res, f, ensure_ascii=False, indent=1, default=float)
     print("已写出 out_q3.json")
