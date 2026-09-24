@@ -150,25 +150,32 @@ def main():
     print(f"Q3_中继架次：{len(stations)} 行；Q3_通信保障：{rr-2} 行")
 
     # ═══ Q4_分区配置 ═══
+    # 各组所需无人机数取**库存约束下的最优分配**（论文 8.3 节）：
+    # 把库存按机型分给各组，使硬时限违反数最少。原先按「每组自备峰值机队」
+    # 的单一机型估计会得出"缺 3 架 B 型"——那是建模口径造成的假缺口。
     ws4 = wb["Q4_分区配置"]
     rr = 2
     for K in ("2", "3"):
         sch = q4["schemes"][K]
+        alloc = sch.get("alloc", {}).get("per_group", [])
         for i, gp in enumerate(sch["groups"], 1):
             ws4.cell(rr, 1, int(K))
             ws4.cell(rr, 2, i)
             ws4.cell(rr, 3, "、".join(gp))
-            nd = sch["need_drone"]
-            per = {g: (nd[g] + len(sch["groups"]) - 1) // len(sch["groups"])
-                   for g in TYPES}
-            ws4.cell(rr, 4, per.get("A", 0))
-            ws4.cell(rr, 5, per.get("B", 0))
-            ws4.cell(rr, 6, per.get("C", 0))
-            ws4.cell(rr, 7, D.load_drones()[2]["A"]["n"])
-            ws4.cell(rr, 8, D.load_drones()[2]["B"]["n"])
-            ws4.cell(rr, 9, D.load_drones()[2]["C"]["n"])
-            ws4.cell(rr, 10, 1)
-            ws4.cell(rr, 11, 2)
+            cp = alloc[i - 1]["cap"] if i - 1 < len(alloc) else {"A": 0, "B": 0, "C": 0}
+            ws4.cell(rr, 4, cp.get("A", 0))
+            ws4.cell(rr, 5, cp.get("B", 0))
+            ws4.cell(rr, 6, cp.get("C", 0))
+            # 7~9 列是**电池组数**（不是无人机数）：取该组"零违反且完成时间不超出
+            # 满池 5%"所需的最少组数（d_q4.min_batteries）。不能直接写满池——那会
+            # 让各组的电池数之和远超库存，不是可行配置。
+            bat = alloc[i - 1].get("bat", {}) if i - 1 < len(alloc) else {}
+            for ci, g in enumerate(TYPES, 7):
+                ws4.cell(rr, ci, bat.get(g, 0))
+            rpg = sch.get("relay_per_group", {})
+            rmg = sch.get("relay_mod_per_group", {})
+            ws4.cell(rr, 10, rpg.get(str(i - 1), rpg.get(i - 1, 0)))
+            ws4.cell(rr, 11, rmg.get(str(i - 1), rmg.get(i - 1, 0)))
             rr += 1
     print(f"Q4_分区配置：{rr-2} 行")
 

@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import sys
@@ -173,6 +174,176 @@ def _boxes(stops):
     return [b for _, gp in stops for b in gp]
 
 
+# ══════════════════════════════════════════════════════════
+def schedule_fleet_capped(W, stops_list, cap, bat_cap=None):
+    """在**指定机型与电池配置**下独立执行一组架次。
+
+    与 schedule_fleet 同一套口径（时限感知、两阶段充电），差别只有三点：
+    机型用量受 cap 约束；电池池也受 bat_cap 约束（默认给满池）；返回完成时刻。
+    cap 里某型为 0 表示该组没有这种机。
+    """
+    _e = {}
+    for st in stops_list:
+        oks = [g for g in W.ok_types(st) if cap.get(g, 0) > 0]
+        if not oks:
+            return None                     # 该配置下有架次无可用机型
+        _e[id(st)] = min(W.route(g, st)[1] for g in oks)
+
+    def key(i):
+        bs = _boxes(stops_list[i])
+        if any(b["first"] or b["kind"] == "医疗物资" for b in bs):
+            return (0, min(b["t_due"] for b in bs), 0.0)
+        return (1, 0.0, -_e[id(stops_list[i])])
+
+    nb = {g: (bat_cap or {}).get(g, W.bats[g]["n"]) for g in TYPES}
+    if any(cap.get(g, 0) > 0 and nb[g] <= 0 for g in TYPES):
+        return None
+    drones = {g: [dict(free=0.0) for _ in range(cap.get(g, 0))] for g in TYPES}
+    bats = {g: [dict(free=0.0) for _ in range(nb[g])] for g in TYPES}
+    viol = E = tdone = 0.0
+    for i in sorted(range(len(stops_list)), key=key):
+        st = stops_list[i]
+        bs = _boxes(st)
+        hard = any(b["first"] or b["kind"] == "医疗物资" for b in bs)
+        due = min(b["t_due"] for b in bs)
+        cand = []
+        for g in W.ok_types(st):
+            if cap.get(g, 0) <= 0:
+                continue
+            t, ee = W.route(g, st)
+            for k, d in enumerate(drones[g]):
+                for j, bt in enumerate(bats[g]):
+                    cand.append((max(d["free"], bt["free"]), ee, g, k, j, t))
+        if not cand:
+            return None
+        if hard:
+            good = [c for c in cand if c[0] + c[5] <= due + 1e-9]
+            if good:
+                cand = good
+        start, ee, g, k, j, t = min(cand, key=lambda c: (c[0], c[1]))
+        end = start + t
+        soc = max(1.0 - ee / W.types[g]["E_use"], 0.0)
+        drones[g][k]["free"] = end
+        bats[g][j]["free"] = end + D.charge_time(soc, W.bats[g]["T_full"])
+        E += ee
+        tdone = max(tdone, end)
+        if hard and end > due + 1e-9:
+            viol += 1
+    return dict(viol=viol, E=E, t_done=tdone)
+
+
+def min_batteries(W, stops_list, cap, t_ref, tol=0.05):
+    """该组在机型配置 cap 下**所需的最少电池组数**。
+
+    题目要求「各组独立核算资源、期间资源不得跨组调配」，电池组也要按组分；
+    缺省的"每组都给满池"会让各组的电池数之和远超库存，不是可行配置。
+
+    **判据不能只看"零违反"**：少给电池会让无人机排队等充电，首批箱照样按时
+    送到，但完成时间被拖长。所以要求同时满足
+    `viol == 0 且 t_done ≤ t_ref × (1 + tol)`（t_ref 取该组满池时的完成时刻）。
+
+    **必须联合搜索而不是逐型二分**：逐型分别压到极限、再叠加起来，总效应会
+    远超单型 5% 的容差（实测 9065 s 被叠到 11004 s，多出 21%）。这里直接枚举
+    该组的全部电池向量（≤ 7×5×5），取"满足判据且组数最少"的那个，
+    同组数时优先少用 A 型——A 型电池是最紧的资源。
+    """
+    lim = t_ref * (1.0 + tol)
+    inv = INV["battery"]
+    best = None
+    for a in range(inv["A"] + 1):
+        for b in range(inv["B"] + 1):
+            for c in range(inv["C"] + 1):
+                if any(cap.get(g, 0) > 0 and v <= 0
+                       for g, v in (("A", a), ("B", b), ("C", c))):
+                    continue
+                bc = {"A": a, "B": b, "C": c}
+                r = schedule_fleet_capped(W, stops_list, cap, bc)
+                if r is None or r["viol"] > 0 or r["t_done"] > lim:
+                    continue
+                k = (a + b + c, a, b, c)
+                if best is None or k < best[0]:
+                    best = (k, bc, r)
+    if best is None:                      # 满池是保底的可行解
+        bc = dict(inv)
+        return bc, schedule_fleet_capped(W, stops_list, cap, bc)
+    return best[1], best[2]
+
+
+def all_caps(inv=INV["drone"]):
+    """所有不超过库存的机型配置（全枚举，规模 = (nA+1)(nB+1)(nC+1) - 1）。"""
+    out = []
+    for a in range(inv["A"] + 1):
+        for b in range(inv["B"] + 1):
+            for c in range(inv["C"] + 1):
+                if a + b + c:
+                    out.append({"A": a, "B": b, "C": c})
+    return out
+
+
+def best_allocation(W, subs, verbose=False):
+    """**库存约束下的最优分配**：把库存按机型分给各组，使硬时限违反数最少。
+
+    $$\min \sum_j \mathrm{Viol}_j(\mathbf n_j)\quad
+      \mathrm{s.t.}\ \sum_j n_{g,j}\le N_g\ \forall g$$
+
+    每组 × 每种配置先算好缓存（K=3 时 3×44 = 132 次排程），再穷举分配组合，
+    所以取到的是**全局最优**而不只是贪心解。
+
+    **这一步改变了问题四的结论**：d_q4.py 原来用一个「每组只配单一机型」的
+    min_fleet 去估需求，得到"两种分区都缺 3 架 B 型"；但库存里有 A、B、C
+    三种机型，按机型混合分配后**库存刚好够、零违反**。原先那个"缺口"是
+    建模口径造成的假缺口——详见论文 8.3 节。
+    """
+    inv = INV["drone"]
+    caps = all_caps(inv)
+    cache = []
+    for sl in subs:
+        tab = {}
+        for cp in caps:
+            tab[tuple(sorted(cp.items()))] = schedule_fleet_capped(W, sl, cp)
+        cache.append(tab)
+    best = None
+    n_eval = 0
+    for combo in itertools.product(range(len(caps)), repeat=len(subs)):
+        tot = {g: sum(caps[i][g] for i in combo) for g in TYPES}
+        if any(tot[g] > inv[g] for g in TYPES):
+            continue
+        n_eval += 1
+        res = [cache[j][tuple(sorted(caps[i].items()))]
+               for j, i in enumerate(combo)]
+        if any(r is None for r in res):
+            continue
+        key = (sum(r["viol"] for r in res), max(r["t_done"] for r in res))
+        if best is None or key < best[0]:
+            best = (key, combo, res, tot)
+    (viol, tmax), combo, res, tot = best
+    per = []
+    for j, (i, r) in enumerate(zip(combo, res)):
+        cp = caps[i]
+        bc, r2 = min_batteries(W, subs[j], cp, t_ref=r["t_done"])
+        per.append(dict(cap=cp, viol=r2["viol"], t=r2["t_done"], E=r2["E"],
+                        bat=bc, t_full=r["t_done"]))
+    bat_tot = {g: sum(p["bat"][g] for p in per) for g in TYPES}
+    tmax = max(p["t"] for p in per)          # 最终配置下的最晚组完成时刻
+    out = dict(alloc=tot, viol=viol, tmax=tmax, n_eval=n_eval,
+               per_group=per, bat_tot=bat_tot,
+               gap_bat={g: max(0, bat_tot[g] - INV["battery"][g]) for g in TYPES})
+    if verbose:
+        print(f"    库存约束下的最优分配（穷举 {n_eval} 个可行组合）："
+              f"{ {g: tot[g] for g in TYPES} } → 违反 {viol:.0f} 个，"
+              f"最晚组完成 {tmax:.0f} s")
+        for j, i in enumerate(combo):
+            cp = caps[i]
+            b = per[j]["bat"]
+            print(f"      组{j+1}：{cp['A']}A+{cp['B']}B+{cp['C']}C，"
+                  f"电池 {b['A']}/{b['B']}/{b['C']} 组"
+                  f" → 违反 {per[j]['viol']:.0f}，"
+                  f"完成 {per[j]['t']:.0f} s（满池时 {per[j]['t_full']:.0f} s）")
+        print(f"    电池组合计 {bat_tot}（库存 {INV['battery']}）"
+              f" → 缺口 {out['gap_bat']}")
+    return out
+
+
 def main():
     W = World()
     rt, W.relays, W.rbats = D.load_relays()
@@ -259,16 +430,30 @@ def main():
                                                   centers[jj][0], centers[jj][1]))
                 s2st[gi].add(j2)
         rel_per = {i2: len(v) for i2, v in s2st.items()}
+        # 各组需要的能源组件数 = 该组分到的那些站位的组件数之和
+        rel_mod = {i2: int(sum(st[j]["n_bat"] for j in v))
+                   for i2, v in s2st.items()}
         rel_need = sum(rel_per.values())
+        mod_need = sum(rel_mod.values())
         print(f"    中继：各组需 {rel_per}，合计 {rel_need} 架（库存 {INV['relay']}）"
               f"  → 缺口 {max(0, rel_need - INV['relay'])} 架")
-        print(f"    合计需运输机 { {g: need_d[g] for g in TYPES} }（库存 "
+        print(f"    对照·各组按单一机型自备峰值机队：合计 "
+              f"{ {g: need_d[g] for g in TYPES} }（库存 "
               f"{ {g: INV['drone'][g] for g in TYPES} }）"
-              f"  → 缺口 { {g: max(0, need_d[g]-INV['drone'][g]) for g in TYPES} }")
+              f"  → 表面上缺 { {g: max(0, need_d[g]-INV['drone'][g]) for g in TYPES} }")
+        print("      ↑ 这个「缺口」是建模口径造成的：它只允许每组配一种机型。")
         ns = [len([s2 for s2 in g1 if all(gid[x] == i2 for x, _ in s2)])
               for i2 in range(len(groups))]
         print(f"    组间均衡：架次 {ns}（极差 {max(ns)-min(ns)}）"
               f"  最小机队 {spans}（极差 {max(spans)-min(spans)}）")
+
+        # 库存约束下的最优分配（把库存按机型分给各组，而不是"每组自备峰值机队"）
+        subs = [[st for st in g1 if all(gid[x] == i2 for x, _ in st)]
+                for i2 in range(len(groups))]
+        alloc = best_allocation(W, subs, verbose=True)
+        print(f"    对照·每组按单一机型自备峰值机队：合计 "
+              f"{ {g: need_d[g] for g in TYPES} }"
+              f"（这才是原先那句「缺 3 架 B 型」的来源，是建模口径造成的假缺口）")
 
         out[K] = dict(groups=groups, cross=bad,
                       need_drone={g: int(need_d[g]) for g in TYPES},
@@ -276,6 +461,10 @@ def main():
                       gap_drone={g: int(max(0, need_d[g] - INV["drone"][g]))
                                  for g in TYPES},
                       gap_relay=int(max(0, rel_need - INV["relay"])),
+                      alloc=alloc,
+                      relay_per_group={int(k2): v for k2, v in rel_per.items()},
+                      relay_mod_per_group={int(k2): v for k2, v in rel_mod.items()},
+                      need_relay_mod=int(mod_need),
                       n_sortie=tot_sortie, E=tot_E)
 
     with open(os.path.join(HERE, "out_q4.json"), "w", encoding="utf-8") as f:
