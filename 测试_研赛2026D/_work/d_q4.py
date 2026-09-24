@@ -183,6 +183,14 @@ def schedule_fleet_capped(W, stops_list, cap, bat_cap=None):
     机型用量受 cap 约束；电池池也受 bat_cap 约束（默认给满池）；返回完成时刻。
     cap 里某型为 0 表示该组没有这种机。
     """
+    # **先把架次列表按内容排序**：schedule 的派发键在并列时靠 sorted 的稳定性
+    # 打破，于是"同一个架次集合、不同的输入顺序"会排出不同的时间表——实测
+    # 同一个分区经两条代码路径算出 12384 s 与 12032 s 两个结果。排序之后，
+    # 本函数成为**架次集合的纯函数**，记忆化缓存也才真正安全。
+    stops_list = sorted(
+        stops_list,
+        key=lambda st: tuple((s, tuple(sorted(b["box"] for b in bs)))
+                             for s, bs in st))
     _e = {}
     for st in stops_list:
         oks = [g for g in W.ok_types(st) if cap.get(g, 0) > 0]
@@ -250,24 +258,24 @@ def min_batteries(W, stops_list, cap, t_ref, tol=0.05):
     """
     lim = t_ref * (1.0 + tol)
     inv = INV["battery"]
-    best = None
-    for a in range(inv["A"] + 1):
-        for b in range(inv["B"] + 1):
-            for c in range(inv["C"] + 1):
-                if any(cap.get(g, 0) > 0 and v <= 0
-                       for g, v in (("A", a), ("B", b), ("C", c))):
-                    continue
-                bc = {"A": a, "B": b, "C": c}
-                r = schedule_fleet_capped(W, stops_list, cap, bc)
-                if r is None or r["viol"] > 0 or r["t_done"] > lim:
-                    continue
-                k = (a + b + c, a, b, c)
-                if best is None or k < best[0]:
-                    best = (k, bc, r)
-    if best is None:                      # 满池是保底的可行解
-        bc = dict(inv)
-        return bc, schedule_fleet_capped(W, stops_list, cap, bc)
-    return best[1], best[2]
+    # 按**组数从小到大**枚举，命中即停——这样第一个可行的就是最优的。
+    # （原来的按字母序枚举要跑满 7×5×5 = 175 次，改成升序后通常几次就命中；
+    #   这是让"每组×每种配置的电池表"能整张算出来、从而不必筛候选的关键。）
+    vecs = sorted(((a, b, c)
+                   for a in range(inv["A"] + 1)
+                   for b in range(inv["B"] + 1)
+                   for c in range(inv["C"] + 1)),
+                  key=lambda v: (sum(v), v))
+    for a, b, c in vecs:
+        if any(cap.get(g, 0) > 0 and v <= 0
+               for g, v in (("A", a), ("B", b), ("C", c))):
+            continue
+        bc = {"A": a, "B": b, "C": c}
+        r = schedule_fleet_capped(W, stops_list, cap, bc)
+        if r is not None and r["viol"] == 0 and r["t_done"] <= lim:
+            return bc, r
+    bc = dict(inv)                         # 满池是保底的可行解
+    return bc, schedule_fleet_capped(W, stops_list, cap, bc)
 
 
 def all_caps(inv=INV["drone"]):
@@ -303,28 +311,58 @@ def best_allocation(W, subs, verbose=False, t_shift=0.0):
         for cp in caps:
             tab[tuple(sorted(cp.items()))] = schedule_fleet_capped(W, sl, cp)
         cache.append(tab)
-    best = None
+    # 先按 (违反数, 运输机缺口, 完成时间) 粗排，再对最优的几组精算电池缺口。
+    # **不能只按 (违反数, 完成时间) 排**：那样选出的分配可能完成时间最短、
+    # 却多用了一组电池——而外层分区的目标里"电池组缺口"排在完成时间之前。
+    # 内层与外层的目标不一致，会让求出的分区在真实目标下不是最优。实测同一
+    # 分区曾出现 12032 s / 电池缺 1 组 与 12384 s / 电池缺 0 组两个结果，
+    # 只按完成时间排就会选错。
+    # **先把"每组 × 每种配置"的电池表整张算出来**，再穷举分配。
+    # 这样目标里的"电池组缺口"对**每一个**组合都是精确的，不必靠筛候选去近似
+    # ——筛候选是不可靠的：实测按完成时间取前 8 名与 30 名，都把"电池缺口 0"
+    # 的那个组合挤掉了，于是内层给出的解在外层目标下并非最优。
+    batab = {}
+    for j in range(len(subs)):
+        for i, cp in enumerate(caps):
+            r = cache[j][tuple(sorted(cp.items()))]
+            if r is None:
+                batab[(j, i)] = None
+                continue
+            bc, _ = min_batteries(W, subs[j], cp, t_ref=r["t_done"])
+            batab[(j, i)] = bc
+
+    rows = []
     n_eval = 0
     for combo in itertools.product(range(len(caps)), repeat=len(subs)):
         tot = {g: sum(caps[i][g] for i in combo) for g in TYPES}
         if any(tot[g] > inv[g] for g in TYPES):
             continue
-        n_eval += 1
         res = [cache[j][tuple(sorted(caps[i].items()))]
                for j, i in enumerate(combo)]
         if any(r is None for r in res):
             continue
-        key = (sum(r["viol"] for r in res), max(r["t_done"] for r in res))
-        if best is None or key < best[0]:
-            best = (key, combo, res, tot)
-    (viol, tmax), combo, res, tot = best
+        if any(batab[(j, i)] is None for j, i in enumerate(combo)):
+            continue
+        n_eval += 1
+        gap_d = sum(max(0, tot[g] - inv[g]) for g in TYPES)
+        bat_tot = {g: sum(batab[(j, i)][g] for j, i in enumerate(combo))
+                   for g in TYPES}
+        gap_b = sum(max(0, bat_tot[g] - INV["battery"][g]) for g in TYPES)
+        key = (sum(r["viol"] for r in res), gap_d, gap_b,
+               max(r["t_done"] for r in res))
+        rows.append((key, combo, res, tot, bat_tot, gap_b))
+    if not rows:
+        raise RuntimeError("无可行的资源分配")
+    rows.sort(key=lambda x: x[0])
+    key, combo, res, tot, bat_tot, gap_b = rows[0]
     per = []
-    for j, (i, r) in enumerate(zip(combo, res)):
-        cp = caps[i]
-        bc, r2 = min_batteries(W, subs[j], cp, t_ref=r["t_done"])
-        per.append(dict(cap=cp, viol=r2["viol"], t=r2["t_done"] + t_shift,
-                        E=r2["E"], bat=bc, t_full=r["t_done"] + t_shift))
-    bat_tot = {g: sum(p["bat"][g] for p in per) for g in TYPES}
+    for j, i in enumerate(combo):
+        r = res[j]
+        bc = batab[(j, i)]
+        rr = schedule_fleet_capped(W, subs[j], caps[i], bc) or r
+        per.append(dict(cap=caps[i], viol=rr["viol"], t=rr["t_done"] + t_shift,
+                        E=rr["E"], bat=bc, t_full=r["t_done"] + t_shift))
+    viol, gap_d, tmax = key[0], key[1], key[3]
     tmax = max(p["t"] for p in per)          # 最终配置下的最晚组完成时刻
     out = dict(alloc=tot, viol=viol, tmax=tmax, n_eval=n_eval,
                per_group=per, bat_tot=bat_tot,
