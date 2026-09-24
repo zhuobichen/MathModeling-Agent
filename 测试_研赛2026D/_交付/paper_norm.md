@@ -554,9 +554,9 @@ $$\min\ \Big(\sum_g \text{Gap}^{\text{drone}}_g,\ \sum_g \text{Gap}^{\text{bat}}
 
 **表 17: 四类分区方案的对照（资源栏为 (8-1) 的最优分配结果）**
 
-<html><body><table><thead><tr><th>方案</th><th>分区</th><th>架次 / 极差</th><th>运输机 / 缺口</th><th>电池组 / 缺口</th><th>中继 / 缺口</th><th>违反</th><th>最晚组完成</th></tr></thead>
+<html><body><table><thead><tr><th>方案</th><th>分组（站）</th><th>架次 / 极差</th><th>运输机 / 电池组（缺口）</th><th>中继 / 缺口</th><th>违反</th><th>最晚组</th></tr></thead>
 
-<tbody><tr><td>K=2 · 地理均衡型</td><td>11 / 4 站</td><td>26 / 10，16</td><td>3A+2B+2C / 0</td><td>5A+4B+4C / 0</td><td>4 / 2</td><td>0</td><td>12882 s</td></tr><tr><td>K=2 · 资源缺口型（推荐）</td><td>8 / 7 站</td><td>19 / 17，2</td><td>4A+2B+2C / 0</td><td>6A+4B+4C / 0</td><td>3 / 1</td><td>0</td><td>10847 s</td></tr><tr><td>K=3 · 地理均衡型</td><td>9 / 4 / 2 站</td><td>21 / 10 / 5，16</td><td>4A+2B+2C / 0</td><td>9A+6B+6C / 7</td><td>6 / 4</td><td>2</td><td>11429 s</td></tr><tr><td>K=3 · 资源缺口型（全局最优）</td><td>8 / 3 / 4 站</td><td>24 / 7 / 5，19</td><td>4A+2B+2C / 0</td><td>6A+4B+4C / 0</td><td>3 / 1</td><td>0</td><td>11794 s</td></tr></tbody></table></body></html>
+<tbody><tr><td>K=2 · 地理均衡型</td><td>11 / 4</td><td>26 / 10，16</td><td>3A+2B+2C ／ 5A+4B+4C（均 0）</td><td>4 / 2</td><td>0</td><td>12882 s</td></tr><tr><td>K=2 · 资源缺口型（推荐）</td><td>8 / 7</td><td>19 / 17，2</td><td>4A+2B+2C ／ 6A+4B+4C（均 0）</td><td>3 / 1</td><td>0</td><td>10847 s</td></tr><tr><td>K=3 · 地理均衡型</td><td>9 / 4 / 2</td><td>21 / 10 / 5，16</td><td>4A+2B+2C ／ 9A+6B+6C（缺 7 组）</td><td>6 / 4</td><td>2</td><td>11429 s</td></tr><tr><td>K=3 · 资源缺口型（全局最优）</td><td>8 / 3 / 4</td><td>24 / 7 / 5，19</td><td>4A+2B+2C ／ 6A+4B+4C（均 0）</td><td>3 / 1</td><td>0</td><td>11794 s</td></tr></tbody></table></body></html>
 
 两个资源缺口型的分区是：
 
