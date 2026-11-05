@@ -1,6 +1,31 @@
 """read_file 工具处理器。"""
 
 import os
+from pathlib import Path
+
+
+def _resolve_within(work_dir: str, filename: str) -> Path | None:
+    """把 filename 解析成 work_dir 内的真实路径；越界返回 None。
+
+    挡住三类逃逸：`..` 相对逃逸、绝对路径、符号链接指向外部。
+    先 resolve() 再比较前缀，符号链接会解析到真实位置，因此能识破"软链到外面"。
+    """
+    if not filename or not str(filename).strip():
+        return None
+    raw = Path(str(filename))
+    if raw.is_absolute():
+        return None
+    base = Path(work_dir).resolve()
+    try:
+        target = (base / raw).resolve()
+    except (OSError, RuntimeError):
+        return None
+    # Python 3.9+：relative_to 在越界时抛 ValueError
+    try:
+        target.relative_to(base)
+    except ValueError:
+        return None
+    return target
 
 
 async def _handle_read_file(args: dict, work_dir: str) -> str:
@@ -9,7 +34,11 @@ async def _handle_read_file(args: dict, work_dir: str) -> str:
     filename = args.get("filename", "")
     n_rows = args.get("n_rows", 20)
     sheet_name = args.get("sheet_name") or 0
-    filepath = os.path.join(work_dir, filename)
+
+    resolved = _resolve_within(work_dir, filename)
+    if resolved is None:
+        return f"错误: 路径 '{filename}' 越出工作目录，已拒绝"
+    filepath = str(resolved)
 
     if not os.path.exists(filepath):
         return f"错误: 文件 '{filename}' 不存在于工作目录"
